@@ -1,0 +1,22 @@
+# This repo holds the tool only. Everything below is personal or third-party data
+# that stays on your PC.
+
+# settings and machine-specific state
+.env
+.lists.local.json
+
+# snapshots (your lists and imported ones), decisions, Nexus caches
+lists/
+plan/
+data/
+
+# never commit game/mod content
+saves/
+mods/
+downloads/
+overwrite/
+*.ess
+*.skse
+*.BethINIbackup
+
+__pycache__/

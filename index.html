@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- Scripts only from this site; mod descriptions may show remote images but can never run code. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' https: data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta name="referrer" content="no-referrer">
+  <title>Modlist Atlas</title>
+  <meta name="description" content="Compare, browse and plan Mod Organizer 2 modlists.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='15' fill='%230e1115' stroke='%23d2ad66' stroke-width='2'/%3E%3Ctext x='16' y='22' font-size='17' text-anchor='middle' fill='%23d2ad66'%3E%E1%9B%9F%3C/text%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@500;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="web/app.css">
+  <script src="web/theme.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand">
+        <div class="brand-rune" aria-hidden="true">ᛟ</div>
+        <div><h1>MODLIST ATLAS</h1><small>Compare · browse · plan Mod Organizer 2 modlists</small></div>
+      </div>
+      <nav class="tabs" role="tablist" aria-label="Views">
+        <button class="tab" role="tab" data-tab="browse">Browse</button>
+        <button class="tab" role="tab" data-tab="compare">Compare</button>
+        <button class="tab" role="tab" data-tab="overview">Overview</button>
+      </nav>
+      <label class="search">
+        <span class="sr-only">Search mods</span>
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+        <input id="search" type="search" placeholder="Search mods, descriptions, notes…" autocomplete="off">
+        <kbd>/</kbd>
+      </label>
+      <div class="top-actions">
+        <button class="btn filters-btn" id="filtersBtn" aria-label="Filters">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 5h18M6 12h12M10 19h4"/></svg>Filters
+        </button>
+        <button class="btn primary" id="snapshotBtn" hidden>
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 5v14M5 12h14"/></svg>
+          Add list<span class="dot-alert" id="changedDot" hidden></span>
+        </button>
+        <button class="btn icon ghost" id="themeBtn" aria-label="Toggle light/dark theme" title="Toggle theme">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+        </button>
+      </div>
+    </div>
+    <div class="listbar" id="listbar"></div>
+  </header>
+
+  <main id="app"><div class="loading">Loading lists…</div></main>
+  <footer id="footer"></footer>
+
+  <div class="scrim" id="scrim"></div>
+  <aside class="drawer" id="drawer" aria-label="Mod details" aria-hidden="true"></aside>
+  <div class="modal-wrap" id="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle"></div>
+  <div class="toast" id="toast" role="status"></div>
+
+  <script src="web/app.js"></script>
+</body>
+</html>
