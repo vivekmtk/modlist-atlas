@@ -301,6 +301,21 @@ class ServerTests(unittest.TestCase):
         status, _ = self.request("POST", "/api/decisions", body={"a/1": {"decision": "delete-everything"}})
         self.assertNotIn("a/1", json.loads(lib.DECISIONS.read_text("utf-8")))
 
+    def test_decisions_bulk_save_replaces_comments(self):
+        self.request("POST", "/api/decisions", body={"b/1": {"decision": "keep", "note": "old"}, "b/2": {"note": "keep me?"}})
+        status, body = self.request("POST", "/api/decisions",
+                                    body={"b/1": {"decision": "drop", "note": "outdated"}, "b/2": {"decision": "drop", "note": "outdated"},
+                                          "b/3": {"decision": "drop", "note": "outdated"}})
+        self.assertEqual(status, 200)
+        store = json.loads(lib.DECISIONS.read_text("utf-8"))
+        for k in ("b/1", "b/2", "b/3"):
+            self.assertEqual((store[k]["decision"], store[k]["note"]), ("drop", "outdated"))
+        self.assertEqual(set(body["saved"]), {"b/1", "b/2", "b/3"})
+        # a decision-only bulk save leaves the comments alone
+        self.request("POST", "/api/decisions", body={"b/1": {"decision": "maybe"}, "b/2": {"decision": "maybe"}})
+        store = json.loads(lib.DECISIONS.read_text("utf-8"))
+        self.assertEqual((store["b/1"]["decision"], store["b/1"]["note"]), ("maybe", "outdated"))
+
     def test_decisions_concurrent_writes_are_not_lost(self):
         keys = [f"c/{i}" for i in range(100)]
         threads = [threading.Thread(target=self.request, args=("POST", "/api/decisions", {k: {"decision": "drop"}}))

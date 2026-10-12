@@ -26,6 +26,8 @@ const S = {
   lists: [], data: {}, decisions: {}, local: null, descriptions: null, catalog: new Map(),
   ui: Object.assign({}, UI_DEFAULTS, store.get("atlas-ui", {})),
   search: "", selected: null, navKeys: [], statusProblem: "", compareLimit: 500, lastFocus: null,
+  // bulk edit: checkboxes stay hidden until "Select" is toggled on; picked holds catalog keys
+  bulk: false, picked: new Set(), bulkDec: "unchanged", bulkNote: "",
 };
 const saveUI = () => store.set("atlas-ui", S.ui);
 
@@ -259,6 +261,55 @@ function quickHTML(key) {
     `<button class="${c} ${d === v ? "on" : ""}" data-act="quick" data-key="${esc(key)}" data-dec="${v}" title="${v}">${t}</button>`).join("")}<button class="c" data-act="comment" data-key="${esc(key)}" title="Comment">💬</button></span>`;
 }
 
+// ------------------------------------------------------------------ bulk edit (hidden behind the "Select" toggle)
+
+function selectToggleHTML() {
+  return S.local ? `<button class="toggle ${S.bulk ? "on" : ""}" data-act="bulk-toggle" aria-pressed="${S.bulk}">☑ Select</button>` : "";
+}
+
+function pickCell(key, name) {
+  return `<td class="pickcell"><input type="checkbox" data-act="pick" data-key="${esc(key)}" aria-label="Select ${esc(name)}" ${S.picked.has(key) ? "checked" : ""}></td>`;
+}
+
+// header checkbox: selects or unselects every matching mod (not just the rows rendered so far)
+function pickHeadCell(keys) {
+  const on = keys.some((k) => S.picked.has(k));
+  const all = keys.length > 0 && keys.every((k) => S.picked.has(k));
+  return `<th class="pickcell"><input type="checkbox" data-act="pick-head" aria-label="Select all matching"
+    ${all ? "checked" : ""} ${on && !all ? "data-some" : ""}></th>`;
+}
+
+function bulkBarHTML(shownKeys) {
+  if (!S.bulk) return "";
+  const shown = new Set(shownKeys);
+  const hidden = [...S.picked].filter((k) => !shown.has(k)).length;
+  const allOn = shown.size > 0 && [...shown].every((k) => S.picked.has(k));
+  return `<div class="bulkbar" role="region" aria-label="Bulk edit">
+    <span class="bulk-count"><b>${S.picked.size}</b> selected${hidden ? ` <span class="muted">(${hidden} not matching filters)</span>` : ""}</span>
+    <button class="btn ghost" data-act="${allOn ? "unpick-shown" : "pick-shown"}">${allOn ? "Unselect" : "Select"} all ${shown.size} matching</button>
+    ${S.picked.size ? `<button class="btn ghost" data-act="pick-none">Clear</button>` : ""}
+    <span class="spacer"></span>
+    <select class="select" data-act="bulk-dec" aria-label="Decision">${[["unchanged", "Decision unchanged"], ["keep", "Keep"], ["drop", "Drop"], ["maybe", "Maybe"], ["", "Undecided"]]
+      .map(([v, t]) => `<option value="${v}" ${S.bulkDec === v ? "selected" : ""}>${t}</option>`).join("")}</select>
+    <input class="bulk-note" data-act="bulk-note" maxlength="2000" value="${esc(S.bulkNote)}" placeholder="Comment (replaces existing; empty = keep)" aria-label="Comment">
+    <button class="btn primary" data-act="bulk-apply" ${S.picked.size ? "" : "disabled"}>Apply</button></div>`;
+}
+
+async function applyBulk() {
+  const patch = {};
+  if (S.bulkDec !== "unchanged") patch.decision = S.bulkDec;
+  if (S.bulkNote.trim()) patch.note = S.bulkNote.trim();
+  if (!Object.keys(patch).length) { toast("Pick a decision or write a comment first"); return; }
+  const n = new Set([...S.picked].map(decKey)).size;
+  const what = [patch.decision !== undefined && `set ${patch.decision || "undecided"}`, patch.note && "replace their comment"].filter(Boolean).join(" and ");
+  if (!window.confirm(`${what[0].toUpperCase() + what.slice(1)} for ${n} mod${n === 1 ? "" : "s"}?`)) return;
+  if (await saveDecisions([...S.picked], patch)) {
+    S.picked.clear();
+    render();
+    toast(`Updated ${n} mod${n === 1 ? "" : "s"}`);
+  }
+}
+
 function sourceLabel(l) {
   if (l.source === "loadorderlibrary") return `Load Order Library${l.author ? " · by " + esc(l.author) : ""}`;
   if (l.source === "upload") return "Uploaded profile files";
@@ -288,6 +339,8 @@ function render() {
   if (S.ui.tab === "compare") renderCompare();
   else if (S.ui.tab === "overview") renderOverview();
   else renderBrowse();
+  // "some selected" can't be expressed in HTML; set the header checkbox's dash after rendering
+  document.querySelectorAll("input[data-some]").forEach((el) => { el.indeterminate = true; });
   if (token) document.querySelector(token)?.focus({ preventScroll: true });
   renderFooter();
   saveUI();
@@ -448,7 +501,8 @@ function renderBrowse() {
       ${S.ui.groupBy === "none" ? `<select class="select" data-act="select-ui" data-k="sort" aria-label="Sort">
         ${[["priority", "Priority"], ["name", "Name"], ["category", "Category"]].map(([v, t]) => `<option value="${v}" ${S.ui.sort === v ? "selected" : ""}>${t}</option>`).join("")}</select>` : ""}
       ${segHTML("view", [["cards", "Cards"], ["table", "Table"]])}
-    </div>${activeFilterPills()}`;
+      ${selectToggleHTML()}
+    </div>${activeFilterPills()}${bulkBarHTML(rows.map((m) => m.ck))}`;
 
   let body;
   if (!rows.length) body = emptyState("Nothing matches", "Try clearing a filter or the search.");
@@ -461,8 +515,10 @@ function renderBrowse() {
 function cardHTML(m) {
   const rec = recOf(m);
   const cat = catOf(m);
-  return `<button class="card ${m.enabled ? "" : "disabled"}" data-act="open" data-key="${esc(m.ck)}" data-list="${esc(m.list)}">
-    <div class="thumb">${thumbHTML(m.name, rec.picture, cat)}
+  // in select mode a card click picks the mod instead of opening it
+  const pick = S.bulk ? ` aria-pressed="${S.picked.has(m.ck)}"` : "";
+  return `<button class="card ${m.enabled ? "" : "disabled"} ${S.bulk && S.picked.has(m.ck) ? "picked" : ""}" data-act="${S.bulk ? "pick" : "open"}" data-key="${esc(m.ck)}" data-list="${esc(m.list)}"${pick}>
+    <div class="thumb">${thumbHTML(m.name, rec.picture, cat)}${S.bulk ? `<span class="pickmark" aria-hidden="true"></span>` : ""}
       <div class="badges"><span>${m.enabled ? "" : `<span class="badge off">disabled</span>`}</span>${decBadge(m.ck)}</div></div>
     <div class="card-body">
       <div class="card-cat">${esc(cat)}</div>
@@ -474,8 +530,8 @@ function cardHTML(m) {
 
 function browseTable(groups) {
   const showSec = S.ui.groupBy !== "section";
-  const cols = 7 + (showSec ? 1 : 0);
-  let html = `<div class="table-wrap"><table><thead><tr><th class="num">#</th><th>Mod</th><th>Category</th>${showSec ? "<th>Separator</th>" : ""}
+  const cols = 7 + (showSec ? 1 : 0) + (S.bulk ? 1 : 0);
+  let html = `<div class="table-wrap"><table><thead><tr>${S.bulk ? pickHeadCell([...groups.values()].flat().map((m) => m.ck)) : ""}<th class="num">#</th><th>Mod</th><th>Category</th>${showSec ? "<th>Separator</th>" : ""}
     <th>Version</th><th>Lists</th><th>Decision</th><th>Description</th></tr></thead><tbody>`;
   for (const [g, ms] of groups) {
     if (g) html += `<tr class="subhead"><td colspan="${cols}">${esc(g)} · ${ms.length}</td></tr>`;
@@ -483,7 +539,7 @@ function browseTable(groups) {
       const rec = recOf(m);
       const d = decOf(m.ck)?.decision;
       html += `<tr class="${m.enabled ? "" : "disabled"}" tabindex="0" data-act="open" data-key="${esc(m.ck)}" data-list="${esc(m.list)}">
-        <td class="num">${m.priority}</td><td><span class="tname">${esc(m.name)}</span></td><td class="tcat">${esc(catOf(m))}</td>
+        ${S.bulk ? pickCell(m.ck, m.name) : ""}<td class="num">${m.priority}</td><td><span class="tname">${esc(m.name)}</span></td><td class="tcat">${esc(catOf(m))}</td>
         ${showSec ? `<td class="muted">${esc(m.section)}</td>` : ""}<td class="muted">${esc(m.version)}</td><td>${dotsHTML(rec)}</td>
         <td>${d ? `<span class="dec ${d}">${d}</span> ` : ""}${quickHTML(m.ck)}${noteHTML(m.ck)}</td><td><div class="tsum">${esc(sumOf(m))}</div></td></tr>`;
     }
@@ -531,13 +587,13 @@ function renderCompare() {
   S.navKeys = rows.map((r) => ({ key: r.key, list: null }));
   const shown = rows.slice(0, S.compareLimit);
   const th = (k, t) => `<th class="sortable" data-act="csort" data-k="${k}">${t} ${S.ui.csort === k ? '<span class="arrow">▾</span>' : ""}</th>`;
-  const table = rows.length ? `<div class="table-wrap"><table><thead><tr>${th("name", "Mod")}${th("category", "Category")}
+  const table = rows.length ? `<div class="table-wrap"><table><thead><tr>${S.bulk ? pickHeadCell(rows.map((r) => r.key)) : ""}${th("name", "Mod")}${th("category", "Category")}
       ${S.lists.map((l) => `<th title="${esc(l.title || l.name)}"><span class="dots"><i class="ldot" style="--c:${l.color}"></i></span> ${esc(l.name)}</th>`).join("")}
       <th>Decision</th><th>Description</th></tr></thead><tbody>
       ${shown.map((rec) => {
         const d = decOf(rec.key)?.decision;
         const nFiles = Math.max(...Object.values(rec.entries).map((e) => e.length));
-        return `<tr tabindex="0" data-act="open" data-key="${esc(rec.key)}"><td><span class="tname">${esc(recName(rec))}</span>${nFiles > 1 ? `<span class="files">+${nFiles - 1} file${nFiles > 2 ? "s" : ""}</span>` : ""}${rec.vdiff ? `<span class="vtag">versions differ</span>` : ""}</td>
+        return `<tr tabindex="0" data-act="open" data-key="${esc(rec.key)}">${S.bulk ? pickCell(rec.key, recName(rec)) : ""}<td><span class="tname">${esc(recName(rec))}</span>${nFiles > 1 ? `<span class="files">+${nFiles - 1} file${nFiles > 2 ? "s" : ""}</span>` : ""}${rec.vdiff ? `<span class="vtag">versions differ</span>` : ""}</td>
           <td class="tcat">${esc(rec.category)}</td>
           ${S.lists.map((l) => {
             const e = rec.entries[l.name];
@@ -550,7 +606,7 @@ function renderCompare() {
     : emptyState("Nothing matches", "Change the list filters above or clear the search.");
 
   const toolbar = `<div class="toolbar"><div><h2>Compare</h2><div class="meta"><b>${rows.length}</b> mods match · click list chips to cycle <i>any → in → not in</i>, or pick an overlap segment</div></div>
-    <span class="spacer"></span><button class="btn" data-act="csv">Download CSV</button></div>${activeFilterPills()}`;
+    <span class="spacer"></span>${selectToggleHTML()}<button class="btn" data-act="csv">Download CSV</button></div>${activeFilterPills()}${bulkBarHTML(rows.map((r) => r.key))}`;
   layout(sidebarCompare(), toolbar + overlap + table);
 }
 
@@ -721,19 +777,26 @@ function navDrawer(delta) {
 
 // ------------------------------------------------------------------ decisions
 
-async function saveDecision(key, patch) {
+const saveDecision = (key, patch) => saveDecisions([key], patch);
+
+// One request for any number of mods: the server applies them in a single locked, atomic write.
+async function saveDecisions(keys, patch) {
   if (!S.local) { toast("Read-only — run python tools/serve.py to record decisions"); return false; }
-  const rec = S.catalog.get(key);
-  const dk = decKey(key);
   // send only the changed fields; the server merges, so a comment save can't undo a decision
-  const body = { [dk]: { ...patch, name: recName(rec), name_key: normName(recName(rec)) } };
+  const body = {};
+  for (const key of keys) {
+    const rec = S.catalog.get(key);
+    if (rec) body[decKey(key)] = { ...patch, name: recName(rec), name_key: normName(recName(rec)) };
+  }
   try {
     const r = await fetch("api/decisions", { method: "POST", headers: API_HEADERS, body: JSON.stringify(body) });
     const j = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
-    const saved = j.saved?.[dk];
-    if (saved) S.decisions[dk] = saved;
-    else delete S.decisions[dk];
+    for (const dk of Object.keys(body)) {
+      const saved = j.saved?.[dk];
+      if (saved) S.decisions[dk] = saved;
+      else delete S.decisions[dk];
+    }
     return true;
   } catch (e) {
     toast("Could not save: " + e.message);
@@ -1078,6 +1141,8 @@ function toast(msg) {
 }
 
 function toggleIn(arr, v) { const i = arr.indexOf(v); if (i >= 0) arr.splice(i, 1); else arr.push(v); }
+function toggleSet(set, v) { if (!set.delete(v)) set.add(v); }
+const shownKeys = () => (S.ui.tab === "compare" ? compareFiltered().map((r) => r.key) : browseFiltered().map((m) => m.ck));
 
 document.addEventListener("click", (ev) => {
   if (!ev.target.closest("#pop") && !ev.target.closest('[data-act="quick"],[data-act="comment"]')) closePopover();
@@ -1135,6 +1200,18 @@ document.addEventListener("click", (ev) => {
     case "pop-save": savePopover(); break;
     case "decide": if (S.selected) decide(S.selected.key, d.dec, true); break;
     case "csv": downloadCSV(); break;
+    case "bulk-toggle": S.bulk = !S.bulk; S.picked.clear(); render(); break;
+    case "pick": toggleSet(S.picked, d.key); render(); break;
+    case "pick-shown": shownKeys().forEach((k) => S.picked.add(k)); render(); break;
+    case "unpick-shown": shownKeys().forEach((k) => S.picked.delete(k)); render(); break;
+    case "pick-none": S.picked.clear(); render(); break;
+    case "pick-head": {
+      const keys = shownKeys();
+      const all = keys.length > 0 && keys.every((k) => S.picked.has(k));
+      keys.forEach((k) => (all ? S.picked.delete(k) : S.picked.add(k)));
+      render(); break;
+    }
+    case "bulk-apply": applyBulk(); break;
     case "goto-browse": S.ui.primary = d.list; S.ui.tab = "browse"; render(); window.scrollTo(0, 0); break;
     case "goto-cat": S.ui.cats = [d.v]; S.ui.tab = "browse"; render(); window.scrollTo(0, 0); break;
     case "goto-decision":
@@ -1172,6 +1249,7 @@ document.addEventListener("click", (ev) => {
 document.addEventListener("change", (ev) => {
   const el = ev.target;
   if (el.dataset?.act === "select-ui") { S.ui[el.dataset.k] = el.value; render(); }
+  if (el.dataset?.act === "bulk-dec") S.bulkDec = el.value;
 });
 
 document.querySelectorAll(".tab").forEach((t) => t.addEventListener("click", () => {
@@ -1197,6 +1275,7 @@ $("#filtersBtn").addEventListener("click", () => { $("#sidebar")?.classList.add(
 // note field autosave
 let noteTimer;
 document.addEventListener("input", (ev) => {
+  if (ev.target.dataset?.act === "bulk-note") { S.bulkNote = ev.target.value; return; }
   if (ev.target.id !== "decNote" || !S.selected) return;
   const key = S.selected.key;
   const note = ev.target.value;
