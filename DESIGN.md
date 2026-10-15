@@ -11,10 +11,10 @@ keep / drop / maybe decisions while building a new setup on top of a Wabbajack l
 ```
 MO2 instance (read-only) ────► tools/export_modlist.py ─┐
 Profile files / folder / zip ► tools/import_files.py ───┤  (shared code: tools/modlist_lib.py)
-Nexus API (optional) ───────────────────────────────────┤
+Nexus API (optional key) / Nexus search (on request) ───┤
                                                          ▼
        lists/<name>/{mods.json, mods.csv, MODLIST*.md, LOADORDER.md, info.json, profile/, notes/}
-       lists/index.json             data/descriptions.json, data/nexus_cache.json
+       lists/index.json             data/descriptions.json, data/nexus_cache.json, data/nexus_match.json
                                                          │
 index.html + web/app.{js,css}  ◄── fetch ────────────────┘
         ▲            │ POST snapshot / import / decisions / freeze
@@ -26,6 +26,8 @@ index.html + web/app.{js,css}  ◄── fetch ───────────
   graphics adapter name blanked).
 - **import_files.py** takes uploaded profile files (loose, a folder, or a zip) when the MO2 install
   isn't available, e.g. a list saved from a modlist website. These only have mod names.
+- **nexus_match.py** finds Nexus mods for name-only mods by title (public v2 GraphQL API, no key),
+  batching 12 names per request, and caches every result and the user's choices.
 - **serve.py** serves the app and a small JSON API. It runs the exporter as a subprocess with
   validated arguments (no shell), so the browser can trigger snapshots and imports.
 - **web app** is static (no build step, no framework); without the server it is read-only.
@@ -36,9 +38,17 @@ index.html + web/app.{js,css}  ◄── fetch ───────────
   (`data/`) are personal or third-party data and are git-ignored, as are `.env` and
   `.lists.local.json`. Nothing about a user's setup or another author's list is ever committed.
 - **Never write to MO2.** Snapshots copy files out; nothing goes back.
-- **No third-party APIs except an optional Nexus key.** Lists from websites are added by uploading
-  their `modlist.txt`, so the tool doesn't depend on any site's unpublished API. Without a Nexus key
-  it makes no network requests at all.
+- **No third-party APIs except Nexus, and only when asked.** Lists from websites are added by
+  uploading their `modlist.txt`, so the tool doesn't depend on any site's unpublished API. Nexus is
+  contacted only with an API key (exports) or when the user clicks **Find on Nexus**; otherwise the
+  tool makes no network requests at all.
+- **Name search: automatic only when unambiguous.** A name-only mod is linked automatically only
+  when exactly one Nexus mod in that game has that exact title. Similar titles (all words present),
+  and searches on a trimmed name (`X - BSA Version` → `X`), are only suggestions for the user to
+  accept or reject, because a trimmed name often points at the main mod instead of its patch.
+  Results are keyed by game and normalized name, so a name is searched once across all lists;
+  accepted / rejected choices are never overwritten by later searches. The app applies matches
+  when building its catalog, so a matched mod merges with the same Nexus mod from MO2 lists.
 - **Game-neutral.** Each mod's Nexus game comes from its own `meta.ini` (`gameName`), falling
   back to the instance's game in `ModOrganizer.ini`; known MO2 short names map to Nexus domains
   (`FalloutNV` → `newvegas`) and unknown ones fall back to the lowercase name. Any `.ini` in the
@@ -74,14 +84,21 @@ index.html + web/app.{js,css}  ◄── fetch ───────────
   CSV exports prefix formula-like cells so spreadsheets don't execute them.
 - **Shared rules have one source.** The server sends the allowed profile files and the list-name
   rule to the app via `/api/status`.
+- **Tables scroll with the page**, their header row sticking under the app header, and columns wrap
+  to fit the window. Only a table still too wide (narrow window, many lists) gets its own frame
+  that scrolls both ways, with a frozen Mod column and the horizontal scrollbar kept on screen.
+- **One theme, one scale.** The app has its own Nordic look. Every radius, font size, control height and fixed colour comes from the
+  tokens at the top of `app.css`; selected states are gold, Nexus-related things are frost blue,
+  filters are pills and actions are rounded rectangles.
 - **Re-rendering keeps context.** The app re-renders from state on every change, but restores the
   sidebar's scroll and open state and the focused element, and returns focus to what opened the
   drawer, so mouse, keyboard and phone use don't lose their place.
 
 ## Limitations
 
-- Uploaded lists have no Nexus IDs; matching by name misses renamed mods
-  until the list is installed and snapshotted from MO2.
+- Uploaded lists have no Nexus IDs or versions. Name search finds most mods, but renamed folders
+  and tool outputs need confirming by hand or aren't found; versions stay unknown until the list
+  is installed and snapshotted from MO2.
 - Mods without a Nexus ID (tool outputs, manual installs) have no link or category.
 - Summaries without a Nexus API key are derived from the cached description and can be poor.
 - Compare colours repeat after 8 lists (each list keeps its colour in this browser).

@@ -7,8 +7,8 @@ to (a Wabbajack list, a guide, a friend's profile) so you can see what's shared,
 what's different. Then you decide, mod by mod or many at once, what to **keep**, **drop** or think
 about later.
 
-It runs on your own PC in your browser. It never changes your MO2 install, and without a Nexus API
-key it never goes online.
+It runs on your own PC in your browser. It never changes your MO2 install, and it only goes online
+when you ask it to: with a Nexus API key, or when you click **Find on Nexus**.
 
 ![Compare view: mods in my setup but not in the Wabbajack list, with keep/drop decisions](docs/screenshots/compare.jpg)
 
@@ -49,8 +49,13 @@ Add at least two lists to compare them. To refresh a list after changing it in M
 Every mod gets one row, and every list gets a column. Click the list chips at the top to cycle each
 one through *any → in → not in*. For example, *in my-setup, not in wabbajack-list* shows exactly
 what you'd lose by switching. Or click a segment of the overlap bar. **Versions differ** finds mods
-that both lists have in different versions. **Download CSV** exports the current view, with your
-decisions, for a spreadsheet.
+that both lists have in different versions (only lists snapshotted from MO2 have versions).
+**Download CSV** exports the current view, with your decisions, for a spreadsheet.
+
+In tables the column headings stay in view as you scroll. If a table is too wide for the window,
+it scrolls sideways in its own frame, with the mod names kept on the left. Your comments have their own column. Click **Comment** in the
+header to filter it like in Excel: tick the comments to show (or *(Blanks)* for mods without
+one), or search the list and press **OK**.
 
 ### Browse a list
 
@@ -70,6 +75,23 @@ In tables, the small **K / D / ?** buttons on each row do the same without openi
 
 Decisions follow the mod, not the list. A mod you marked *keep* shows as *keep* in every list that
 has it, and decisions survive re-snapshots and deleting lists.
+
+### Find uploaded mods on Nexus
+
+Uploaded lists only have mod names, so their mods have no Nexus link, category or description
+unless one of your MO2 lists has the same mod. Click **Find on Nexus** at the top to search Nexus
+for every such name:
+
+- **Exact title, one mod**: linked automatically, e.g. `Vanilla Scripting Enhancements`.
+- **Close titles**: kept as suggestions, e.g. `Vanilla Scripting Enhancements - BSA Version` or a
+  patch whose name starts like the main mod. The button shows how many are waiting. Open a mod (or
+  use the **Needs Nexus review** filter) to **Accept** the right one or choose **None of these**.
+- **Nothing found**: tool outputs, renamed or removed mods. Tick *Search again for names that
+  weren't found* on a later run to retry only these.
+
+Results are saved, so each name is searched only once, and new lists only search their new names.
+A wrong automatic match can be undone from the mod's details. No API key is needed; only mod names
+are sent to Nexus.
 
 ### Decide on many mods at once
 
@@ -118,7 +140,7 @@ as Nexus's API policy allows).
 
 - **Read-only towards MO2.** Snapshots copy files out; nothing is ever written back.
 - **Offline by default.** Without a Nexus key, it only reads your MO2 folder and the files you
-  upload.
+  upload. **Find on Nexus** sends mod names to Nexus only when you click it.
 - **Only on your PC.** The server listens on `localhost` only and refuses requests from other
   websites.
 - **No personal paths.** Absolute paths and your graphics card name are blanked in copied INIs.
@@ -131,7 +153,7 @@ Everything stays in the project folder, unless you set `ATLAS_HOME` to use anoth
 |---|---|
 | `lists/<name>/` | Snapshots: `MODLIST.md`, `MODLIST_BY_CATEGORY.md`, `LOADORDER.md`, `mods.csv`/`json`, MO2 profile files |
 | `plan/` | `decisions.json`: your keep / drop / maybe decisions and comments |
-| `data/` | Nexus descriptions read from MO2 and Nexus API results |
+| `data/` | Nexus descriptions read from MO2, Nexus API results, and **Find on Nexus** results and your choices (`nexus_match.json`) |
 | `.env`, `.lists.local.json` | Your settings and which MO2 folder each list came from |
 
 Back these up to keep a history. None of them are part of the repository, so updating the tool
@@ -150,8 +172,9 @@ never touches them.
 ## Good to know
 
 - **Uploaded lists only have mod names.** They're matched to your other lists by name, and borrow
-  links, categories and descriptions from them. A renamed mod won't match until the list is
-  installed and snapshotted from MO2.
+  links, categories and descriptions from them. **Find on Nexus** fills in the rest by title; a
+  mod with a very different folder name may still need to be confirmed by hand or won't be found.
+  Versions are never known for uploaded lists.
 - **Mods without a Nexus ID** (tool outputs, manual installs) have no link or category.
 - **Adding lists and saving decisions need the local server** (`Modlist Atlas.bat`). Served any
   other way, the app is a read-only viewer.

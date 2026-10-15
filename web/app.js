@@ -1,5 +1,6 @@
 /* Modlist Atlas — browse and compare MO2 modlists.
-   Data: lists/index.json, lists/<name>/mods.json, plan/decisions.json, data/descriptions.json.
+   Data: lists/index.json, lists/<name>/mods.json, plan/decisions.json, data/descriptions.json,
+   data/nexus_match.json (Nexus search results for name-only mods).
    With tools/serve.py running, /api/* adds Snapshot and decision saving. */
 "use strict";
 
@@ -11,6 +12,7 @@ const safeUrl = (u) => (/^https?:\/\//i.test(String(u || "").trim()) ? String(u)
 const normName = (n) => "name:" + n.toLowerCase().replace(/[^a-z0-9]+/g, "");
 const PH_COLORS = ["#d2ad66", "#8cc3df", "#e0806a", "#9cc98a", "#b39ae0", "#7fd1b9", "#c98f6a", "#a7b4c9"];
 const API_HEADERS = { "Content-Type": "application/json", "X-Modlist-Atlas": "1" };
+const ICON_NOTE = `<svg class="ic" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round" aria-hidden="true"><path d="M4 5h16v11H10l-5 4v-4H4z"/></svg>`;
 
 const store = {
   get(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } },
@@ -19,11 +21,13 @@ const store = {
 
 const UI_DEFAULTS = {
   tab: "browse", primary: null, tri: {}, cats: [], secs: [], status: "all", decision: "all",
-  groupBy: "section", view: "cards", sort: "priority", csort: "lists", onlyVdiff: false,
+  groupBy: "section", view: "cards", sort: "priority", csort: "lists", onlyVdiff: false, onlyReview: false,
   allCats: false, allSecs: false, ovBase: null, chartAll: false,
 };
 const S = {
   lists: [], data: {}, decisions: {}, local: null, descriptions: null, catalog: new Map(),
+  // Nexus search results; names another list has an ID for; Comment column filter (null = all, else the ticked comments)
+  matches: {}, knownNames: new Map(), noteSel: null,
   ui: Object.assign({}, UI_DEFAULTS, store.get("atlas-ui", {})),
   search: "", selected: null, navKeys: [], statusProblem: "", compareLimit: 500, lastFocus: null,
   // bulk edit: checkboxes stay hidden until "Select" is toggled on; picked holds catalog keys
@@ -61,6 +65,7 @@ async function loadAll() {
     S.data[l.name] = await getJSON(`lists/${encodeURIComponent(l.name)}/mods.json`).catch(() => []);
   }));
   S.decisions = await getJSON("plan/decisions.json").catch(() => ({}));
+  S.matches = await getJSON("data/nexus_match.json").catch(() => ({}));
   S.statusProblem = "";
   try {
     const r = await fetch("api/status", { cache: "no-store" });
@@ -84,7 +89,7 @@ async function loadAll() {
 function firstRunHTML() {
   return S.local
     ? emptyState("No lists yet", `Add a snapshot of an MO2 profile, or upload profile files (a folder, a .zip, or a modlist.txt).
-        <div style="margin-top:14px"><button class="btn primary" data-act="add-list">+ Add your first list</button></div>`)
+        <div class="empty-actions"><button class="btn primary" data-act="add-list">+ Add your first list</button></div>`)
     : emptyState("No lists yet", "Start the local server (<code>Modlist Atlas.bat</code> or <code>python tools/serve.py</code>) to add lists.");
 }
 
@@ -95,6 +100,7 @@ async function init() {
     S.lists = [];
   }
   $("#snapshotBtn").hidden = !S.local;
+  $("#nexusBtn").hidden = !S.local;
   let hash = "";
   try { hash = decodeURIComponent(location.hash.slice(1)); } catch (e) { hash = ""; }
   if (!S.lists.length) {
@@ -112,18 +118,27 @@ async function init() {
 
 // ------------------------------------------------------------------ catalog: one record per mod across lists
 
+// Nexus search result for a name-only mod, in the game last searched (tools/nexus_match.py)
+const nexusMatchOf = (nameKey) => (S.matches.domain ? S.matches.games?.[S.matches.domain]?.[nameKey] : null) || null;
+const isMatched = (entry) => (entry?.status === "auto" || entry?.status === "accepted") && entry.id;
+
 function buildCatalog() {
-  // name-only mods (uploaded lists) resolve to a Nexus key when another list knows the name
+  // name-only mods (uploaded lists) resolve to a Nexus key when another list knows the name,
+  // or else when a Nexus search matched it (automatically or confirmed by the user)
   const nameIdx = new Map();
   for (const l of S.lists) for (const m of S.data[l.name]) {
     if (!m.key.startsWith("name:") && !nameIdx.has(normName(m.name))) nameIdx.set(normName(m.name), m.key);
   }
+  S.knownNames = nameIdx;
   S.catalog = new Map();
   for (const l of S.lists) for (const m of S.data[l.name]) {
-    const key = m.key.startsWith("name:") && nameIdx.has(m.key) ? nameIdx.get(m.key) : m.key;
+    let key = m.key;
+    const nx = key.startsWith("name:") && !nameIdx.has(key) ? nexusMatchOf(key) : null;
+    if (key.startsWith("name:")) key = nameIdx.get(key) || (isMatched(nx) ? `${S.matches.domain}/${nx.id}` : key);
     m.ck = key; m.list = l.name;
     let rec = S.catalog.get(key);
-    if (!rec) { rec = { key, entries: {}, names: new Set() }; S.catalog.set(key, rec); }
+    if (!rec) { rec = { key, entries: {}, names: new Set(), nms: [] }; S.catalog.set(key, rec); }
+    if (nx && !rec.nms.some((n) => n.key === m.key)) rec.nms.push({ key: m.key, entry: nx });
     (rec.entries[l.name] ||= []).push(m);
     rec.names.add(m.name);
     if (!rec.url && m.url) rec.url = m.url;
@@ -132,6 +147,16 @@ function buildCatalog() {
     if (m.summary_source === "nexus" && rec.summary_source !== "nexus") { rec.summary = m.summary; rec.summary_source = "nexus"; }
   }
   for (const rec of S.catalog.values()) {
+    for (const { entry } of rec.nms) {
+      const c = isMatched(entry) && entry.candidates.find((x) => x.id === entry.id);
+      if (!c) continue;
+      rec.url ||= `https://www.nexusmods.com/${S.matches.domain}/mods/${c.id}`;
+      rec.nexus_id ||= c.id;
+      for (const f of ["author", "picture", "endorsements"]) if (!rec[f] && c[f]) rec[f] = c[f];
+      if (!rec.category && c.category) rec.category = c.category;
+      if (c.summary && rec.summary_source !== "nexus") { rec.summary = c.summary; rec.summary_source = "nexus"; }
+    }
+    rec.review = rec.nms.some((n) => n.entry.status === "suggest");
     rec.category ||= "Uncategorized";
     const vers = new Set();
     for (const ms of Object.values(rec.entries)) if (ms[0].version) vers.add(ms[0].version);
@@ -177,6 +202,9 @@ function matchSearch(texts, toks) {
   return toks.every((t) => hay.includes(t));
 }
 
+const noteOf = (key) => (decOf(key)?.note || "").trim();
+const notePass = (key) => !S.noteSel || S.noteSel.has(noteOf(key));
+
 function decisionPass(key) {
   const f = S.ui.decision;
   if (f === "all") return true;
@@ -191,6 +219,8 @@ function browseFiltered(skip) {
     if (skip !== "secs" && S.ui.secs.length && !S.ui.secs.includes(m.section)) return false;
     if (skip !== "status" && S.ui.status !== "all" && (S.ui.status === "enabled") !== m.enabled) return false;
     if (skip !== "decision" && !decisionPass(m.ck)) return false;
+    if (S.ui.onlyReview && !recOf(m).review) return false;
+    if (skip !== "note" && !notePass(m.ck)) return false;
     return matchSearch([m.name, sumOf(m), catOf(m), m.section, m.notes, decOf(m.ck)?.note], toks);
   });
 }
@@ -211,6 +241,8 @@ function compareFiltered(skip) {
     if (skip !== "cats" && S.ui.cats.length && !S.ui.cats.includes(rec.category)) continue;
     if (skip !== "decision" && !decisionPass(rec.key)) continue;
     if (S.ui.onlyVdiff && !rec.vdiff) continue;
+    if (S.ui.onlyReview && !rec.review) continue;
+    if (skip !== "note" && !notePass(rec.key)) continue;
     if (!matchSearch([...rec.names, rec.summary, rec.category, decOf(rec.key)?.note], toks)) continue;
     out.push(rec);
   }
@@ -250,21 +282,26 @@ function decBadge(key) {
   return d ? `<span class="badge ${d}">${d}</span>` : "";
 }
 
-function noteHTML(key) {
+// Comment column: click the cell to edit; the header holds a filter box (Excel-style)
+function noteCellHTML(key) {
   const n = decOf(key)?.note;
-  return n ? `<div class="cnote" title="${esc(n)}">${esc(n)}</div>` : "";
+  return `<td class="tnote" data-act="comment" data-key="${esc(key)}" title="${esc(n || "Add a comment")}">${n ? esc(n) : `<span class="add">+ comment</span>`}</td>`;
 }
+const noteHeadHTML = () => `<th><button class="colmenu ${S.noteSel ? "on" : ""}" data-act="note-menu" aria-haspopup="true" title="Filter by comment">Comment
+  <svg width="11" height="11" viewBox="0 0 24 24" fill="${S.noteSel ? "currentColor" : "none"}" stroke="currentColor" stroke-width="2.4" aria-hidden="true"><path d="M3 4h18l-7 8v7l-4 2v-9z"/></svg></button></th>`;
+const noMatchRow = () => `<tr class="subhead"><td colspan="99">No mods match the filters</td></tr>`;
+const reviewTag = (rec) => (rec.review ? `<span class="vtag rtag" title="A Nexus search found possible matches; open the mod to confirm">review match</span>` : "");
 
 function quickHTML(key) {
   const d = decOf(key)?.decision || "";
   return `<span class="quick">${[["keep", "k", "K"], ["drop", "d", "D"], ["maybe", "m", "?"]].map(([v, c, t]) =>
-    `<button class="${c} ${d === v ? "on" : ""}" data-act="quick" data-key="${esc(key)}" data-dec="${v}" title="${v}">${t}</button>`).join("")}<button class="c" data-act="comment" data-key="${esc(key)}" title="Comment">💬</button></span>`;
+    `<button class="${c} ${d === v ? "on" : ""}" data-act="quick" data-key="${esc(key)}" data-dec="${v}" title="${v}">${t}</button>`).join("")}<button class="c" data-act="comment" data-key="${esc(key)}" title="Comment" aria-label="Comment">${ICON_NOTE}</button></span>`;
 }
 
 // ------------------------------------------------------------------ bulk edit (hidden behind the "Select" toggle)
 
 function selectToggleHTML() {
-  return S.local ? `<button class="toggle ${S.bulk ? "on" : ""}" data-act="bulk-toggle" aria-pressed="${S.bulk}">☑ Select</button>` : "";
+  return S.local ? `<button class="btn" data-act="bulk-toggle" aria-pressed="${S.bulk}">☑ Select</button>` : "";
 }
 
 function pickCell(key, name) {
@@ -336,15 +373,32 @@ function render() {
   renderListbar();
   const changed = S.local && Object.values(S.local.lists || {}).some((s) => s.changed);
   $("#changedDot").hidden = !changed;
+  const toReview = reviewCount();
+  $("#nexusCount").hidden = !toReview;
+  $("#nexusCount").textContent = toReview;
   if (S.ui.tab === "compare") renderCompare();
   else if (S.ui.tab === "overview") renderOverview();
   else renderBrowse();
   // "some selected" can't be expressed in HTML; set the header checkbox's dash after rendering
   document.querySelectorAll("input[data-some]").forEach((el) => { el.indeterminate = true; });
-  if (token) document.querySelector(token)?.focus({ preventScroll: true });
+  fitTables();
+  const focusEl = token && document.querySelector(token);
+  if (focusEl) {
+    focusEl.focus({ preventScroll: true });
+  }
   renderFooter();
   saveUI();
 }
+
+// A table scrolls with the page unless it's too wide for the window; then it gets its own frame
+// (horizontal scrollbar, frozen Mod column). See .table-wrap.framed in app.css.
+function fitTables() {
+  for (const w of document.querySelectorAll(".table-wrap")) {
+    w.classList.remove("framed");
+    if (w.scrollWidth > w.clientWidth + 1) w.classList.add("framed");
+  }
+}
+window.addEventListener("resize", fitTables);
 
 function renderFooter() {
   const problem = S.statusProblem ? `<div class="footer-problem">⚠ ${esc(S.statusProblem)}</div>` : "";
@@ -428,6 +482,7 @@ function sidebarBrowse() {
   const st = browseFiltered("status");
   const on = st.filter((m) => m.enabled).length;
   return `<div class="facet"><h3>Status</h3>${segHTML("status", [["all", `All ${st.length}`], ["enabled", `On ${on}`], ["disabled", `Off ${st.length - on}`]])}</div>
+    ${reviewCount() || S.ui.onlyReview ? `<div class="facet"><h3>Show</h3><div class="toggles">${reviewToggleHTML()}</div></div>` : ""}
     ${decisionFacet(browseFiltered("decision"), (m) => m.ck)}
     ${facetHTML("Category", "cats", cats, S.ui.cats, S.ui.allCats, "allCats")}
     ${facetHTML("Separator", "secs", secs, S.ui.secs, S.ui.allSecs, "allSecs", false)}`;
@@ -437,9 +492,15 @@ function sidebarCompare() {
   const catRows = compareFiltered("cats");
   const cats = [...countBy(catRows, (r) => r.category)].map(([v, n]) => ({ v, n })).sort((a, b) => b.n - a.n || a.v.localeCompare(b.v));
   return `<div class="facet"><h3>Show</h3><div class="toggles">
-      <button class="toggle ${S.ui.onlyVdiff ? "on" : ""}" data-act="toggle-ui" data-k="onlyVdiff">Versions differ</button></div></div>
+      <button class="toggle ${S.ui.onlyVdiff ? "on" : ""}" data-act="toggle-ui" data-k="onlyVdiff">Versions differ</button>
+      ${reviewCount() || S.ui.onlyReview ? reviewToggleHTML() : ""}</div></div>
     ${decisionFacet(compareFiltered("decision"), (r) => r.key)}
     ${facetHTML("Category", "cats", cats, S.ui.cats, S.ui.allCats, "allCats")}`;
+}
+
+const reviewCount = () => [...S.catalog.values()].filter((r) => r.review).length;
+function reviewToggleHTML() {
+  return `<button class="toggle ${S.ui.onlyReview ? "on" : ""}" data-act="toggle-ui" data-k="onlyReview">Needs Nexus review <span class="muted">${reviewCount()}</span></button>`;
 }
 
 function activeFilterPills() {
@@ -449,9 +510,11 @@ function activeFilterPills() {
   if (S.ui.tab === "browse") for (const s of S.ui.secs) pills.push(["sec:" + s, "⟡ " + s]);
   if (S.ui.decision !== "all") pills.push(["decision", S.ui.decision === "none" ? "Undecided" : S.ui.decision]);
   if (S.ui.tab === "browse" && S.ui.status !== "all") pills.push(["status", S.ui.status]);
+  if (S.ui.onlyReview) pills.push(["review", "Needs Nexus review"]);
+  if (S.noteSel) pills.push(["note", S.noteSel.size === 1 ? `Comment: “${[...S.noteSel][0] || "(Blanks)"}”` : `Comment: ${S.noteSel.size} values`]);
   if (!pills.length) return "";
   return `<div class="active-filters">${pills.map(([k, t]) => `<span class="pill">${esc(t)}<button data-act="unpill" data-k="${esc(k)}" aria-label="Remove filter">×</button></span>`).join("")}
-    <button class="btn ghost" data-act="clear-all" style="padding:2px 8px;font-size:12px">Clear all</button></div>`;
+    <button class="btn ghost sm" data-act="clear-all">Clear all</button></div>`;
 }
 
 function layout(sidebar, main) {
@@ -505,7 +568,7 @@ function renderBrowse() {
     </div>${activeFilterPills()}${bulkBarHTML(rows.map((m) => m.ck))}`;
 
   let body;
-  if (!rows.length) body = emptyState("Nothing matches", "Try clearing a filter or the search.");
+  if (!rows.length && !(S.noteSel && S.ui.view === "table")) body = emptyState("Nothing matches", "Try clearing a filter or the search.");
   else if (S.ui.view === "table") body = browseTable(groups);
   else body = [...groups].map(([g, ms]) => `<div class="group">${g ? `<div class="group-head">${esc(g)} <span class="n">${ms.length}</span></div>` : ""}
       <div class="cards">${ms.map(cardHTML).join("")}</div></div>`).join("");
@@ -519,32 +582,32 @@ function cardHTML(m) {
   const pick = S.bulk ? ` aria-pressed="${S.picked.has(m.ck)}"` : "";
   return `<button class="card ${m.enabled ? "" : "disabled"} ${S.bulk && S.picked.has(m.ck) ? "picked" : ""}" data-act="${S.bulk ? "pick" : "open"}" data-key="${esc(m.ck)}" data-list="${esc(m.list)}"${pick}>
     <div class="thumb">${thumbHTML(m.name, rec.picture, cat)}${S.bulk ? `<span class="pickmark" aria-hidden="true"></span>` : ""}
-      <div class="badges"><span>${m.enabled ? "" : `<span class="badge off">disabled</span>`}</span>${decBadge(m.ck)}</div></div>
+      <div class="badges"><span>${m.enabled ? "" : `<span class="badge off">disabled</span>`}${rec.review ? `<span class="badge rv">review match</span>` : ""}</span>${decBadge(m.ck)}</div></div>
     <div class="card-body">
       <div class="card-cat">${esc(cat)}</div>
       <div class="card-title">${esc(m.name)}</div>
       <div class="card-sum">${esc(sumOf(m)) || `<span class="muted">No description</span>`}</div>
-      <div class="card-foot"><span>#${m.priority}${m.version ? ` · v${esc(m.version)}` : ""}${decOf(m.ck)?.note ? ` · <span title="${esc(decOf(m.ck).note)}">💬</span>` : ""}</span>${dotsHTML(rec)}</div>
+      <div class="card-foot"><span>#${m.priority}${m.version ? ` · v${esc(m.version)}` : ""}${decOf(m.ck)?.note ? ` · <span class="has-note" title="${esc(decOf(m.ck).note)}">${ICON_NOTE}</span>` : ""}</span>${dotsHTML(rec)}</div>
     </div></button>`;
 }
 
 function browseTable(groups) {
   const showSec = S.ui.groupBy !== "section";
-  const cols = 7 + (showSec ? 1 : 0) + (S.bulk ? 1 : 0);
-  let html = `<div class="table-wrap"><table><thead><tr>${S.bulk ? pickHeadCell([...groups.values()].flat().map((m) => m.ck)) : ""}<th class="num">#</th><th>Mod</th><th>Category</th>${showSec ? "<th>Separator</th>" : ""}
-    <th>Version</th><th>Lists</th><th>Decision</th><th>Description</th></tr></thead><tbody>`;
+  const cols = 8 + (showSec ? 1 : 0) + (S.bulk ? 1 : 0);
+  let html = `<div class="table-wrap"><table class="browse ${S.bulk ? "bulk" : ""}"><thead><tr>${S.bulk ? pickHeadCell([...groups.values()].flat().map((m) => m.ck)) : ""}<th class="num tpri">#</th><th class="tmod">Mod</th><th>Category</th>${showSec ? "<th>Separator</th>" : ""}
+    <th>Version</th><th>Lists</th><th>Decision</th>${noteHeadHTML()}<th>Description</th></tr></thead><tbody>`;
   for (const [g, ms] of groups) {
-    if (g) html += `<tr class="subhead"><td colspan="${cols}">${esc(g)} · ${ms.length}</td></tr>`;
+    if (g) html += `<tr class="subhead"><td colspan="${cols}"><span class="sublabel">${esc(g)} · ${ms.length}</span></td></tr>`;
     for (const m of ms) {
       const rec = recOf(m);
       const d = decOf(m.ck)?.decision;
       html += `<tr class="${m.enabled ? "" : "disabled"}" tabindex="0" data-act="open" data-key="${esc(m.ck)}" data-list="${esc(m.list)}">
-        ${S.bulk ? pickCell(m.ck, m.name) : ""}<td class="num">${m.priority}</td><td><span class="tname">${esc(m.name)}</span></td><td class="tcat">${esc(catOf(m))}</td>
+        ${S.bulk ? pickCell(m.ck, m.name) : ""}<td class="num tpri">${m.priority}</td><td class="tmod"><span class="tname">${esc(m.name)}</span>${reviewTag(rec)}</td><td class="tcat">${esc(catOf(m))}</td>
         ${showSec ? `<td class="muted">${esc(m.section)}</td>` : ""}<td class="muted">${esc(m.version)}</td><td>${dotsHTML(rec)}</td>
-        <td>${d ? `<span class="dec ${d}">${d}</span> ` : ""}${quickHTML(m.ck)}${noteHTML(m.ck)}</td><td><div class="tsum">${esc(sumOf(m))}</div></td></tr>`;
+        <td class="tdec">${d ? `<span class="dec ${d}">${d}</span> ` : ""}${quickHTML(m.ck)}</td>${noteCellHTML(m.ck)}<td><div class="tsum">${esc(sumOf(m))}</div></td></tr>`;
     }
   }
-  return html + "</tbody></table></div>";
+  return html + (groups.size && [...groups.values()].some((g) => g.length) ? "" : noMatchRow()) + "</tbody></table></div>";
 }
 
 // ------------------------------------------------------------------ compare
@@ -586,23 +649,24 @@ function renderCompare() {
   rows.sort(sorters[S.ui.csort] || sorters.lists);
   S.navKeys = rows.map((r) => ({ key: r.key, list: null }));
   const shown = rows.slice(0, S.compareLimit);
-  const th = (k, t) => `<th class="sortable" data-act="csort" data-k="${k}">${t} ${S.ui.csort === k ? '<span class="arrow">▾</span>' : ""}</th>`;
-  const table = rows.length ? `<div class="table-wrap"><table><thead><tr>${S.bulk ? pickHeadCell(rows.map((r) => r.key)) : ""}${th("name", "Mod")}${th("category", "Category")}
-      ${S.lists.map((l) => `<th title="${esc(l.title || l.name)}"><span class="dots"><i class="ldot" style="--c:${l.color}"></i></span> ${esc(l.name)}</th>`).join("")}
-      <th>Decision</th><th>Description</th></tr></thead><tbody>
+  const th = (k, t, cls = "") => `<th class="sortable ${cls}" data-act="csort" data-k="${k}">${t} ${S.ui.csort === k ? '<span class="arrow">▾</span>' : ""}</th>`;
+  const table = rows.length || S.noteSel ? `<div class="table-wrap"><table class="${S.bulk ? "bulk" : ""}"><thead><tr>${S.bulk ? pickHeadCell(rows.map((r) => r.key)) : ""}${th("name", "Mod", "tmod")}${th("category", "Category")}
+      ${S.lists.map((l) => `<th class="lcol" title="${esc(l.title || l.name)}"><span class="lhead"><i class="ldot" style="--c:${l.color}"></i><span>${esc(l.name)}</span></span></th>`).join("")}
+      <th>Decision</th>${noteHeadHTML()}<th>Description</th></tr></thead><tbody>
       ${shown.map((rec) => {
         const d = decOf(rec.key)?.decision;
         const nFiles = Math.max(...Object.values(rec.entries).map((e) => e.length));
-        return `<tr tabindex="0" data-act="open" data-key="${esc(rec.key)}">${S.bulk ? pickCell(rec.key, recName(rec)) : ""}<td><span class="tname">${esc(recName(rec))}</span>${nFiles > 1 ? `<span class="files">+${nFiles - 1} file${nFiles > 2 ? "s" : ""}</span>` : ""}${rec.vdiff ? `<span class="vtag">versions differ</span>` : ""}</td>
+        return `<tr tabindex="0" data-act="open" data-key="${esc(rec.key)}">${S.bulk ? pickCell(rec.key, recName(rec)) : ""}<td class="tmod"><span class="tname">${esc(recName(rec))}</span>${nFiles > 1 ? `<span class="files">+${nFiles - 1} file${nFiles > 2 ? "s" : ""}</span>` : ""}${rec.vdiff ? `<span class="vtag">versions differ</span>` : ""}${reviewTag(rec)}</td>
           <td class="tcat">${esc(rec.category)}</td>
           ${S.lists.map((l) => {
             const e = rec.entries[l.name];
             const tip = e ? `${e[0].name}${e[0].version ? " v" + e[0].version : ""}${e[0].enabled ? "" : " (disabled)"}` : "absent";
-            return `<td title="${esc(l.name + ": " + tip)}"><span class="dots"><i class="ldot ${e ? "" : "off"} ${e && rec.vdiff ? "vdiff" : ""}" style="--c:${l.color};${e && !e[0].enabled ? "opacity:.45" : ""}"></i></span>${e && rec.vdiff && e[0].version ? ` <span class="muted" style="font-size:11px">${esc(e[0].version)}</span>` : ""}</td>`;
+            return `<td class="lcol" title="${esc(l.name + ": " + tip)}"><span class="dots"><i class="ldot ${e ? "" : "off"} ${e && rec.vdiff ? "vdiff" : ""}" style="--c:${l.color};${e && !e[0].enabled ? "opacity:.45" : ""}"></i></span>${e && rec.vdiff && e[0].version ? `<span class="lver">${esc(e[0].version)}</span>` : ""}</td>`;
           }).join("")}
-          <td>${d ? `<span class="dec ${d}">${d}</span> ` : ""}${quickHTML(rec.key)}${noteHTML(rec.key)}</td>
+          <td class="tdec">${d ? `<span class="dec ${d}">${d}</span> ` : ""}${quickHTML(rec.key)}</td>
+          ${noteCellHTML(rec.key)}
           <td><div class="tsum">${esc(rec.summary || "")}</div></td></tr>`;
-      }).join("")}</tbody></table></div>${rows.length > shown.length ? `<p class="more-row"><span class="muted">Showing ${shown.length} of ${rows.length}</span> <button class="btn" data-act="more-rows">Show ${Math.min(500, rows.length - shown.length)} more</button></p>` : ""}`
+      }).join("")}${rows.length ? "" : noMatchRow()}${rows.length > shown.length ? `<tr class="more-tr"><td colspan="99"><div class="more-row"><span class="muted">Showing ${shown.length} of ${rows.length}</span> <button class="btn" data-act="more-rows">Show ${Math.min(500, rows.length - shown.length)} more</button></div></td></tr>` : ""}</tbody></table></div>`
     : emptyState("Nothing matches", "Change the list filters above or clear the search.");
 
   const toolbar = `<div class="toolbar"><div><h2>Compare</h2><div class="meta"><b>${rows.length}</b> mods match · click list chips to cycle <i>any → in → not in</i>, or pick an overlap segment</div></div>
@@ -620,11 +684,12 @@ function renderOverview() {
     if (S.local && src) acts.push(`<button class="btn" data-act="resnap" data-list="${esc(l.name)}">Re-snapshot</button>`);
     if (S.local) acts.push(`<button class="btn ghost" data-act="freeze" data-list="${esc(l.name)}">${l.frozen ? "Unfreeze" : "Freeze"}</button>`);
     if (S.local) acts.push(`<button class="btn ghost danger" data-act="delete-list" data-list="${esc(l.name)}">Delete</button>`);
-    const src2 = safeUrl(l.website) || safeUrl(l.url);
-    if (src2) acts.push(`<a class="btn ghost" href="${esc(src2)}" target="_blank" rel="noopener noreferrer">Source ↗</a>`);
+    const srcUrl = safeUrl(l.website) || safeUrl(l.url);
+    // the title only when it says more than the name (MO2 snapshots are titled "<name> — MO2 profile …")
+    const title = l.title && l.title !== l.name && !l.title.startsWith(l.name + " — ") ? l.title : "";
     return `<div class="stat" style="--c:${l.color}">
-      <h3>${esc(l.name)} ${l.frozen ? '<span title="Frozen" style="font-size:13px">🔒</span>' : ""}</h3>
-      <div class="sub">${esc(l.title && l.title !== l.name ? l.title : "")}<br>${sub} · ${esc(relTime(l.generated))}</div>
+      <h3>${esc(l.name)}${l.frozen ? '<span class="lock" title="Frozen">🔒</span>' : ""}${srcUrl ? `<a class="src-link" href="${esc(srcUrl)}" target="_blank" rel="noopener noreferrer" title="Open the list's source page">Source ↗</a>` : ""}</h3>
+      <div class="sub">${title ? `<div class="sub-title">${esc(title)}</div>` : ""}<div>${sub} · ${esc(relTime(l.generated))}</div></div>
       <div class="nums"><div><b>${l.mods}</b><span>Mods</span></div><div><b>${l.enabled}</b><span>Enabled</span></div><div><b>${l.active_plugins ?? l.plugins}</b><span>Plugins</span></div></div>
       ${src?.changed ? `<div class="changed">● MO2 changed since this snapshot</div>` : ""}
       <div class="acts">${acts.join("")}</div></div>`;
@@ -639,12 +704,12 @@ function renderOverview() {
   const allCats = new Set(perList.flatMap((m) => [...m.keys()]));
   const catRows = [...allCats].map((c) => ({ c, max: Math.max(...perList.map((m) => m.get(c) || 0)) })).sort((a, b) => (a.c === "Uncategorized") - (b.c === "Uncategorized") || b.max - a.max);
   const shownCats = S.ui.chartAll ? catRows : catRows.slice(0, 14);
-  const gmax = Math.max(1, ...catRows.map((r) => r.max));
+  const gmax = Math.max(1, ...shownCats.map((r) => r.max));
   const chart = `<div class="panel"><h3>Categories</h3><p class="hint">Unique mods per Nexus category in each list. Click a category to browse it.</p>
     <div class="legend">${S.lists.map((l) => `<span><i style="--c:${l.color}"></i>${esc(l.name)}</span>`).join("")}</div>
-    <div class="catchart">${shownCats.map(({ c }) => `<div class="cl" data-act="goto-cat" data-v="${esc(c)}" title="${esc(c)}">${esc(c)}</div>
-      <div class="bars">${S.lists.map((l, i) => { const n = perList[i].get(c) || 0; return `<div class="b" style="--c:${l.color};width:${(n / gmax) * 85}%" title="${esc(l.name)}: ${n}"><span>${n || ""}</span></div>`; }).join("")}</div>`).join("")}</div>
-    ${catRows.length > 14 ? `<button class="more btn ghost" data-act="toggle-ui" data-k="chartAll" style="margin-top:10px">${S.ui.chartAll ? "Show fewer" : `Show all ${catRows.length}`}</button>` : ""}</div>`;
+    <div class="catchart">${shownCats.map(({ c }) => `<div class="catrow"><div class="cl" data-act="goto-cat" data-v="${esc(c)}" title="${esc(c)}">${esc(c)}</div>
+      <div class="bars">${S.lists.map((l, i) => { const n = perList[i].get(c) || 0; return `<div class="b" style="--c:${l.color};width:${(n / gmax) * 85}%" title="${esc(l.name)}: ${n}"><span>${n || ""}</span></div>`; }).join("")}</div></div>`).join("")}</div>
+    ${catRows.length > 14 ? `<button class="btn ghost sm chart-more" data-act="toggle-ui" data-k="chartAll">${S.ui.chartAll ? "Show fewer" : `Show all ${catRows.length}`}</button>` : ""}</div>`;
 
   // migration progress for the base list
   const baseName = S.ui.ovBase;
@@ -656,25 +721,25 @@ function renderOverview() {
   const progress = `<div class="panel"><h3>Decisions</h3>
     <p class="hint">Keep / drop / maybe for every mod in
       <select class="select" data-act="select-ui" data-k="ovBase">${S.lists.map((l) => `<option ${l.name === baseName ? "selected" : ""}>${esc(l.name)}</option>`).join("")}</select></p>
-    <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:10px"><span class="big-pct">${Math.round((decided / tot) * 100)}%</span><span class="muted">${decided} of ${baseKeys.length} decided</span></div>
-    <div class="progress"><i style="width:${(cnt.keep / tot) * 100}%;background:var(--keep)"></i><i style="width:${(cnt.maybe / tot) * 100}%;background:var(--maybe)"></i><i style="width:${(cnt.drop / tot) * 100}%;background:var(--drop)"></i></div>
-    <div class="prog-legend">${[["keep", "Keep", "var(--keep)"], ["maybe", "Maybe", "var(--maybe)"], ["drop", "Drop", "var(--drop)"], ["none", "Undecided", "var(--muted)"]].map(([v, t, c]) =>
-      `<button data-act="goto-decision" data-v="${v}"><span>${t}</span><b style="color:${c}">${cnt[v]}</b></button>`).join("")}</div></div>`;
+    <div class="big-row"><span class="big-pct">${Math.round((decided / tot) * 100)}%</span><span class="muted">${decided} of ${baseKeys.length} decided</span></div>
+    <div class="progress">${["keep", "maybe", "drop"].map((v) => `<i class="${v}" style="width:${(cnt[v] / tot) * 100}%"></i>`).join("")}</div>
+    <div class="prog-legend">${[["keep", "Keep"], ["maybe", "Maybe"], ["drop", "Drop"], ["none", "Undecided"]].map(([v, t]) =>
+      `<button data-act="goto-decision" data-v="${v}"><span>${t}</span><b class="${v}">${cnt[v]}</b></button>`).join("")}</div></div>`;
 
   // pairwise overlap
   const keySets = S.lists.map((l) => new Set(S.data[l.name].map((m) => m.ck)));
   const matrix = `<div class="panel"><h3>Shared mods</h3><p class="hint">Unique mods two lists have in common (diagonal: list size). Click a cell to compare.</p>
-    <div style="overflow:auto"><table class="matrix"><tr><th></th>${S.lists.map((l) => `<th style="color:${l.color}">${esc(l.name)}</th>`).join("")}</tr>
-    ${S.lists.map((a, i) => `<tr><th style="color:${a.color};text-align:right">${esc(a.name)}</th>${S.lists.map((b, j) => {
+    <div class="matrix-wrap"><table class="matrix"><tr><th></th>${S.lists.map((l) => `<th style="--c:${l.color}">${esc(l.name)}</th>`).join("")}</tr>
+    ${S.lists.map((a, i) => `<tr><th class="row-h" style="--c:${a.color}">${esc(a.name)}</th>${S.lists.map((b, j) => {
       let n = 0; for (const k of keySets[i]) if (keySets[j].has(k)) n++;
       const pct = n / Math.max(1, Math.min(keySets[i].size, keySets[j].size));
-      return `<td data-act="pair" data-a="${esc(a.name)}" data-b="${esc(b.name)}" style="cursor:pointer;background:color-mix(in srgb, var(--gold) ${Math.round(pct * (i === j ? 18 : 55))}%, var(--panel-2))">${n}</td>`;
+      return `<td data-act="pair" data-a="${esc(a.name)}" data-b="${esc(b.name)}" style="background:color-mix(in srgb, var(--gold) ${Math.round(pct * (i === j ? 18 : 55))}%, var(--panel-2))">${n}</td>`;
     }).join("")}</tr>`).join("")}</table></div></div>`;
 
   $("#app").innerHTML = `<div class="layout wide"><section>
     <div class="toolbar"><div><h2>Overview</h2><div class="meta">${S.lists.length} lists · ${S.catalog.size} unique mods across all of them</div></div></div>
     <div class="ov-grid">${cards}</div>
-    <div class="two-col"><div>${chart}</div><div>${progress}${matrix}</div></div></section></div>`;
+    <div class="two-col">${progress}${matrix}</div>${chart}</section></div>`;
 }
 
 // ------------------------------------------------------------------ BBCode -> HTML (escaped first, then a safe subset)
@@ -726,6 +791,7 @@ async function openDrawer(key, listName, keepFocus = false) {
       <h2>${esc(name)}</h2>
       <div class="by">${rec.author ? `by ${esc(rec.author)} · ` : ""}${esc(cat)}${url ? ` · <a href="${esc(url)}" target="_blank" rel="noopener noreferrer">Open on Nexus ↗</a>` : ""}</div>
       ${rec.summary || primary.summary ? `<p class="lead">${esc(rec.summary_source === "nexus" ? rec.summary : primary.summary || rec.summary)}</p>` : ""}
+      ${nexusBoxHTML(rec)}
       <div class="decide">
         <div class="decide-btns">${[["keep", "k", "K"], ["drop", "d", "D"], ["maybe", "m", "M"]].map(([v, c, k]) =>
           `<button class="${c} ${dec.decision === v ? "on" : ""}" data-act="decide" data-dec="${v}" ${ro ? "disabled" : ""}>${v[0].toUpperCase() + v.slice(1)}<kbd>${k}</kbd></button>`).join("")}</div>
@@ -757,6 +823,52 @@ async function openDrawer(key, listName, keepFocus = false) {
   const keys = [key, ...Object.values(rec.entries).flat().map((m) => m.key)];
   const text = keys.map((k) => S.descriptions[k]).find(Boolean);
   $("#descBox").innerHTML = text ? bbcode(text) : `<span class="muted">No cached description${url ? ` — <a href="${esc(url)}" target="_blank" rel="noopener noreferrer">see Nexus</a>` : ""}.</span>`;
+}
+
+// What a Nexus title search found for this mod's name(s), with accept / reject / undo
+function nexusBoxHTML(rec) {
+  const ro = !S.local ? "disabled" : "";
+  const btn = (nkey, action, label, cls = "btn ghost", id = "") =>
+    `<button class="${cls}" data-act="nx" data-nx="${action}" data-nkey="${esc(nkey)}"${id ? ` data-id="${id}"` : ""} ${ro}>${label}</button>`;
+  return rec.nms.map(({ key, entry }) => {
+    if (entry.status === "suggest") {
+      const cands = entry.candidates.map((c) => {
+        const url = `https://www.nexusmods.com/${encodeURIComponent(S.matches.domain)}/mods/${encodeURIComponent(c.id)}`;
+        const meta = [c.author && `by ${esc(c.author)}`, esc(c.category), c.endorsements ? `${Number(c.endorsements).toLocaleString()} endorsements` : ""].filter(Boolean).join(" · ");
+        return `<div class="nxcand"><div class="nxinfo"><a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(c.name)} ↗</a>
+          <div class="muted">${meta}</div>${c.summary ? `<div class="nxsum">${esc(c.summary)}</div>` : ""}</div>${btn(key, "accept", "Accept", "btn", c.id)}</div>`;
+      }).join("");
+      return `<div class="nxbox"><div class="sec-title">Possible Nexus match</div>
+        <p class="hint">Nexus has no mod titled exactly “${esc(entry.name)}”. Pick the right one, or none.</p>${cands}
+        <div class="nxfoot">${btn(key, "reject", "None of these")}</div></div>`;
+    }
+    if (isMatched(entry)) {
+      return `<div class="nxnote">✓ Matched on Nexus by name${entry.status === "auto" ? " (exact title)" : " (confirmed by you)"} ${btn(key, "reset", "Undo")}</div>`;
+    }
+    if (entry.status === "rejected") return `<div class="nxnote muted">You rejected the Nexus suggestions for “${esc(entry.name)}”. ${btn(key, "reset", "Show them again")}</div>`;
+    return "";
+  }).join("");
+}
+
+async function setNexusMatch(nkey, action, id) {
+  if (!S.local) { toast("Read-only — run python tools/serve.py to confirm matches"); return; }
+  try {
+    const body = { domain: S.matches.domain, key: nkey, action, ...(id ? { id: Number(id) } : {}) };
+    const r = await fetch("api/nexus/match", { method: "POST", headers: API_HEADERS, body: JSON.stringify(body) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
+    S.matches.games[S.matches.domain][nkey] = j.entry;
+  } catch (e) {
+    toast("Could not save: " + e.message);
+    return;
+  }
+  buildCatalog();
+  resolveDecisionKeys();
+  render();
+  // the mod's key changes when it gains or loses a Nexus ID: reopen it under the new one
+  const rec = [...S.catalog.values()].find((r) => r.nms.some((n) => n.key === nkey));
+  if (rec && S.selected) openDrawer(rec.key, S.selected.list, true);
+  toast({ accept: "Matched to Nexus", reject: "Suggestions rejected", reset: "Match undone" }[action]);
 }
 
 function closeDrawer() {
@@ -853,7 +965,7 @@ function trapFocus(ev, container) {
 function nameHelp(n) {
   const l = listByName(n);
   if (!n) return "Lowercase letters, digits, <code>.</code> <code>_</code> <code>-</code>.";
-  if (!nameRule().test(n)) return `<span style="color:var(--drop)">Use lowercase letters, digits, . _ - only.</span>`;
+  if (!nameRule().test(n)) return `<span class="err">Use lowercase letters, digits, . _ - only.</span>`;
   return l ? `Replaces <b>${esc(n)}</b> (${l.mods} mods, ${esc(relTime(l.generated))})${l.frozen ? " — <b>frozen</b>, you'll be asked to confirm" : ""}.`
     : `Creates a new list <b>${esc(n)}</b>.`;
 }
@@ -879,7 +991,7 @@ function renderModalTab(prefill = {}) {
   const body = $("#modalBody");
   if (modalTab === "mo2") {
     const recent = Object.entries(S.local?.lists || {});
-    body.innerHTML = `<p class="muted" style="margin-top:0">Copies a profile's modlist, plugins and INIs from a Mod Organizer 2 install into <code>lists/&lt;name&gt;/</code>, with Nexus links, categories and descriptions from each mod. MO2 is only read, never changed.</p>
+    body.innerHTML = `<p class="intro">Copies a profile's modlist, plugins and INIs from a Mod Organizer 2 install into <code>lists/&lt;name&gt;/</code>, with Nexus links, categories and descriptions from each mod. MO2 is only read, never changed.</p>
       ${recent.length ? `<div class="field"><label>Refresh an existing snapshot</label><div class="recent">${recent.map(([n, s]) =>
         `<button data-act="snap-recent" data-list="${esc(n)}"><span><b>${esc(n)}</b> <span class="muted">← ${esc(s.profile)} · ${esc(s.mo2)}</span></span>
           ${s.available === false ? `<span class="chg">MO2 folder missing</span>` : s.changed ? `<span class="chg">● changed</span>` : `<span class="ok">up to date</span>`}</button>`).join("")}</div></div>` : ""}
@@ -895,7 +1007,7 @@ function renderModalTab(prefill = {}) {
     $("#snapName").addEventListener("input", () => { $("#snapName").dataset.edited = "1"; });
     if (prefill.name) $("#snapName").dataset.edited = "1";
   } else if (modalTab === "upload") {
-    body.innerHTML = `<p class="muted" style="margin-top:0">For lists whose MO2 install isn't on this PC: someone else's profile, an old backup, or a list shared online (save its <code>modlist.txt</code>). Drop a profile folder, a <code>.zip</code> of one, or the files themselves. <b>modlist.txt</b> is required; <code>plugins.txt</code>, <code>loadorder.txt</code> and INIs are optional.</p>
+    body.innerHTML = `<p class="intro">For lists whose MO2 install isn't on this PC: someone else's profile, an old backup, or a list shared online (save its <code>modlist.txt</code>). Drop a profile folder, a <code>.zip</code> of one, or the files themselves. <b>modlist.txt</b> is required; <code>plugins.txt</code>, <code>loadorder.txt</code> and INIs are optional.</p>
       <div class="dropzone" id="dropzone" tabindex="0">
         <div class="dz-rune">ᛉ</div>
         <div><b>Drop files, a folder or a .zip here</b></div>
@@ -906,7 +1018,7 @@ function renderModalTab(prefill = {}) {
       <div class="file-chips" id="fileChips"></div>
       ${nameField("upName", prefill.name || "")}
       <div class="field"><label for="upTitle">Title (optional)</label><input id="upTitle" placeholder="e.g. Friend's survival list" maxlength="200"></div>
-      <div class="help" style="margin:-6px 0 12px">Without the mods folder there are no Nexus IDs; mods are matched to your other lists by name.</div>
+      <div class="help upload-note">Without the mods folder there are no Nexus IDs; mods are matched to your other lists by name.</div>
       <div class="modal-actions"><button class="btn ghost" data-act="modal-close">Cancel</button><button class="btn primary" id="goBtn" data-act="import-files">Import</button></div>
       <div id="modalLog"></div>`;
     const dz = $("#dropzone");
@@ -1066,6 +1178,185 @@ async function deleteList(name, confirm = false) {
   }
 }
 
+// ------------------------------------------------------------------ Nexus name search (tools/nexus_match.py)
+
+// names without a Nexus ID that no other list can supply one for
+function unmatchedNames() {
+  const keys = new Set();
+  for (const l of S.lists) for (const m of S.data[l.name]) if (m.key.startsWith("name:") && !S.knownNames.has(m.key)) keys.add(m.key);
+  return keys;
+}
+
+function defaultGame() {
+  if (S.matches.domain) return S.matches.domain;
+  const counts = countBy(Object.values(S.data).flat().filter((m) => m.domain), (m) => m.domain);
+  return [...counts].sort((a, b) => b[1] - a[1])[0]?.[0] || "skyrimspecialedition";
+}
+
+function nexusSummary() {
+  const domain = ($("#nxGame")?.value || "").trim().toLowerCase();
+  const retry = $("#nxRetry")?.checked;
+  const game = S.matches.games?.[domain] || {};
+  const names = unmatchedNames();
+  let cached = 0, misses = 0;
+  for (const k of names) if (game[k]) { cached++; if (game[k].status === "none") misses++; }
+  const todo = names.size - cached + (retry ? misses : 0);
+  const mins = Math.ceil((todo / 12) * 3 / 60);
+  return `<b>${names.size.toLocaleString()}</b> mod names have no Nexus ID · <b>${cached.toLocaleString()}</b> already searched${misses ? ` (${misses.toLocaleString()} not found)` : ""} ·
+    <b>${todo.toLocaleString()}</b> to search${todo ? ` (about ${mins} min)` : ""}`;
+}
+
+let nexusPoll = null;
+async function openNexusLookup() {
+  const domains = [...new Set([defaultGame(), ...Object.keys(S.matches.games || {}), ...Object.values(S.data).flat().map((m) => m.domain).filter(Boolean)])];
+  openModal(`<div class="modal-head"><h2 id="modalTitle">Find mods on Nexus</h2><button class="btn icon ghost" data-act="modal-close" aria-label="Close">×</button></div>
+    <div class="modal-body">
+      <p class="intro">Uploaded lists only have mod names. This searches Nexus Mods for each name and links the mod when exactly one Nexus mod has that title. Close matches are kept as suggestions for you to confirm in the mod's details. Results are saved, so a name is only searched once. Only mod names are sent to Nexus.</p>
+      <div class="field"><label for="nxGame">Nexus game</label><input id="nxGame" list="nxGames" value="${esc(defaultGame())}" spellcheck="false" autocomplete="off">
+        <datalist id="nxGames">${domains.map((d) => `<option value="${esc(d)}">`).join("")}</datalist>
+        <div class="help">As in the game's Nexus URL, e.g. <code>skyrimspecialedition</code>, <code>fallout4</code>.</div></div>
+      <label class="check"><input type="checkbox" id="nxRetry"> Search again for names that weren't found last time</label>
+      <div class="nxsummary" id="nxSummary"></div>
+      <div id="nxProgress"></div>
+      <div class="modal-actions" id="nxActions"><button class="btn ghost" data-act="modal-close">Close</button><button class="btn primary" id="goBtn" data-act="nx-go">Search Nexus</button></div>
+    </div>`);
+  const update = () => { $("#nxSummary").innerHTML = nexusSummary(); };
+  $("#nxGame").addEventListener("input", update);
+  $("#nxRetry").addEventListener("change", update);
+  update();
+  const r = await fetch("api/nexus/progress").then((x) => x.json()).catch(() => null);
+  if (r?.running) watchNexusLookup();
+}
+
+async function startNexusLookup() {
+  const domain = $("#nxGame").value.trim().toLowerCase();
+  try {
+    const r = await fetch("api/nexus/lookup", { method: "POST", headers: API_HEADERS, body: JSON.stringify({ domain, retry: $("#nxRetry").checked }) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
+  } catch (e) {
+    toast(e.message);
+    return;
+  }
+  watchNexusLookup();
+}
+
+// Polls the background search; keeps going if the dialog is closed and refreshes the app when done.
+function watchNexusLookup() {
+  clearInterval(nexusPoll);
+  const paint = (p) => {
+    const box = $("#nxProgress");
+    if (!box) return;
+    const c = p.counts || {};
+    const pct = p.total ? Math.round((p.done / p.total) * 100) : 0;
+    box.innerHTML = `<div class="nxbar"><i style="width:${pct}%"></i></div>
+      <div class="muted">${p.running ? `Searching… ${p.done.toLocaleString()} of ${p.total.toLocaleString()}` : "Finished"} ·
+        <span class="ok">${c.auto || 0} matched</span> · <span class="rv">${c.suggest || 0} to review</span> · ${c.none || 0} not found</div>
+      ${p.error ? `<div class="err">${esc(p.error)}</div>` : ""}`;
+    $("#nxActions").innerHTML = p.running
+      ? `<button class="btn ghost" data-act="modal-close">Hide</button><button class="btn" data-act="nx-stop">Stop</button>`
+      : `<button class="btn ghost" data-act="modal-close">Close</button>${reviewCount() ? `<button class="btn primary" data-act="nx-review">Review ${reviewCount()} suggestions</button>` : ""}`;
+  };
+  const tick = async () => {
+    const p = await fetch("api/nexus/progress").then((x) => x.json()).catch(() => null);
+    if (!p) return;
+    if (!p.running) {
+      clearInterval(nexusPoll);
+      S.matches = await getJSON("data/nexus_match.json").catch(() => S.matches);
+      buildCatalog();
+      resolveDecisionKeys();
+      render();
+      if ($("#nxSummary")) $("#nxSummary").innerHTML = nexusSummary();
+      if (!$("#nxProgress")) toast(p.error || "Nexus search finished");
+    }
+    paint(p);
+  };
+  tick();
+  nexusPoll = setInterval(tick, 1000);
+}
+
+// ------------------------------------------------------------------ Comment column filter (Excel-style value checklist)
+
+let noteMenu = null; // { values: [[comment, count]], checked: Set, base: Set, q }
+
+// distinct comments among the rows that pass every other filter, A→Z, (Blanks) last
+function noteValues() {
+  const keys = S.ui.tab === "compare" ? compareFiltered("note").map((r) => r.key) : browseFiltered("note").map((m) => m.ck);
+  return [...countBy(keys, noteOf)].sort((a, b) => (a[0] === "") - (b[0] === "") || a[0].localeCompare(b[0], undefined, { sensitivity: "base" }));
+}
+
+function noteMenuVisible() {
+  const toks = noteMenu.q.toLowerCase().split(/\s+/).filter(Boolean);
+  return noteMenu.values.filter(([v]) => matchSearch([v || "(blanks)"], toks));
+}
+
+function openNoteMenu(btn) {
+  const values = noteValues();
+  const checked = new Set(values.map(([v]) => v).filter((v) => !S.noteSel || S.noteSel.has(v)));
+  noteMenu = { values, checked, base: new Set(checked), q: "" };
+  const el = document.createElement("div");
+  el.className = "pop notemenu";
+  el.id = "notemenu";
+  el.setAttribute("role", "dialog");
+  el.setAttribute("aria-label", "Filter by comment");
+  el.innerHTML = `<input type="search" id="nmSearch" placeholder="Search comments" autocomplete="off" aria-label="Search comments">
+    <div class="nm-list" id="nmList"></div>
+    <div class="pop-foot"><span class="muted" id="nmCount"></span><button class="btn ghost" data-act="nm-cancel">Cancel</button><button class="btn primary" data-act="nm-ok">OK</button></div>`;
+  document.body.appendChild(el);
+  const rect = btn.getBoundingClientRect();
+  const w = Math.min(320, document.documentElement.clientWidth - 16);
+  el.style.width = w + "px";
+  el.style.top = `${window.scrollY + rect.bottom + 6}px`;
+  el.style.left = `${Math.max(8, Math.min(window.scrollX + rect.left, window.scrollX + document.documentElement.clientWidth - w - 8))}px`;
+  renderNoteMenu();
+  const search = $("#nmSearch");
+  search.focus();
+  search.addEventListener("input", () => {
+    noteMenu.q = search.value;
+    // like Excel: searching ticks every match; clearing the search restores the earlier ticks
+    noteMenu.checked = noteMenu.q.trim() ? new Set(noteMenuVisible().map(([v]) => v)) : new Set(noteMenu.base);
+    renderNoteMenu();
+  });
+  search.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); applyNoteMenu(); } });
+}
+
+function renderNoteMenu() {
+  const vis = noteMenuVisible();
+  $("#nmList").innerHTML = vis.length
+    ? `<label class="nm-item nm-all"><input type="checkbox" data-act="nm-all"> <span class="nm-v">(Select all${noteMenu.q.trim() ? " search results" : ""})</span></label>
+      ${vis.map(([v, n]) => `<label class="nm-item"><input type="checkbox" data-act="nm-item" data-v="${esc(v)}" ${noteMenu.checked.has(v) ? "checked" : ""}>
+        <span class="nm-v" title="${esc(v)}">${v ? esc(v) : "<i>(Blanks)</i>"}</span><span class="n">${n}</span></label>`).join("")}`
+    : `<div class="muted nm-empty">No comments match</div>`;
+  syncNoteAll();
+}
+
+function syncNoteAll() {
+  const all = $("#nmList [data-act='nm-all']");
+  const vis = noteMenuVisible();
+  const on = vis.filter(([v]) => noteMenu.checked.has(v)).length;
+  if (all) { all.checked = on > 0 && on === vis.length; all.indeterminate = on > 0 && on < vis.length; }
+  $("#nmCount").textContent = `${on} of ${vis.length}`;
+}
+
+function applyNoteMenu() {
+  const vis = noteMenuVisible().map(([v]) => v);
+  const pool = noteMenu.q.trim() ? vis : noteMenu.values.map(([v]) => v);
+  const sel = new Set(pool.filter((v) => noteMenu.checked.has(v)));
+  if (!sel.size) { toast("Tick at least one comment"); return; }
+  S.noteSel = !noteMenu.q.trim() && sel.size === noteMenu.values.length ? null : sel;
+  S.compareLimit = 500;
+  closeNoteMenu();
+  render();
+  $('[data-act="note-menu"]')?.focus({ preventScroll: true });
+}
+
+function closeNoteMenu(refocus = false) {
+  if (!noteMenu) return;
+  noteMenu = null;
+  $("#notemenu")?.remove();
+  if (refocus) $('[data-act="note-menu"]')?.focus({ preventScroll: true });
+}
+
 // ------------------------------------------------------------------ comment popover (after quick keep/drop/maybe)
 
 function closePopover() { $("#pop")?.remove(); }
@@ -1146,6 +1437,7 @@ const shownKeys = () => (S.ui.tab === "compare" ? compareFiltered().map((r) => r
 
 document.addEventListener("click", (ev) => {
   if (!ev.target.closest("#pop") && !ev.target.closest('[data-act="quick"],[data-act="comment"]')) closePopover();
+  if (!ev.target.closest("#notemenu") && !ev.target.closest('[data-act="note-menu"]')) closeNoteMenu();
   const el = ev.target.closest("[data-act]");
   if (el && el.tagName === "SELECT") return;
   if (!el) {
@@ -1182,9 +1474,11 @@ document.addEventListener("click", (ev) => {
       else if (k.startsWith("sec:")) toggleIn(S.ui.secs, k.slice(4));
       else if (k === "decision") S.ui.decision = "all";
       else if (k === "status") S.ui.status = "all";
+      else if (k === "review") S.ui.onlyReview = false;
+      else if (k === "note") S.noteSel = null;
       render(); break;
     }
-    case "clear-all": S.search = ""; $("#search").value = ""; Object.assign(S.ui, { cats: [], secs: [], status: "all", decision: "all", onlyVdiff: false }); render(); break;
+    case "clear-all": S.search = ""; $("#search").value = ""; S.noteSel = null; Object.assign(S.ui, { cats: [], secs: [], status: "all", decision: "all", onlyVdiff: false, onlyReview: false }); render(); break;
     case "open": if (!ev.target.closest("a")) openDrawer(d.key, d.list || null); break;
     case "close": closeDrawer(); break;
     case "quick": {
@@ -1236,6 +1530,15 @@ document.addEventListener("click", (ev) => {
     case "import-files": runImportFiles(); break;
     case "modal-close": closeModal(); break;
     case "delete-list": deleteList(d.list); break;
+    case "nx": setNexusMatch(d.nkey, d.nx, d.id); break;
+    case "note-menu": if (noteMenu) closeNoteMenu(); else openNoteMenu(el); break;
+    case "nm-item": if (el.checked) noteMenu.checked.add(d.v); else noteMenu.checked.delete(d.v); syncNoteAll(); break;
+    case "nm-all": noteMenuVisible().forEach(([v]) => (el.checked ? noteMenu.checked.add(v) : noteMenu.checked.delete(v))); renderNoteMenu(); break;
+    case "nm-ok": applyNoteMenu(); break;
+    case "nm-cancel": closeNoteMenu(); break;
+    case "nx-go": startNexusLookup(); break;
+    case "nx-stop": fetch("api/nexus/stop", { method: "POST", headers: API_HEADERS, body: "{}" }); break;
+    case "nx-review": closeModal(); S.ui.onlyReview = true; S.ui.tab = "compare"; render(); window.scrollTo(0, 0); break;
     case "freeze": {
       const l = listByName(d.list);
       fetch("api/freeze", { method: "POST", headers: { "Content-Type": "application/json", "X-Modlist-Atlas": "1" }, body: JSON.stringify({ name: d.list, frozen: !l.frozen }) })
@@ -1256,6 +1559,14 @@ document.querySelectorAll(".tab").forEach((t) => t.addEventListener("click", () 
   S.ui.tab = t.dataset.tab; render(); window.scrollTo(0, 0);
 }));
 
+// sticky table headers sit under the app header; a framed table fits between header and footer
+const topbar = document.querySelector(".topbar"), footer = $("#footer");
+new ResizeObserver(() => {
+  document.documentElement.style.setProperty("--topbar-h", `${topbar.offsetHeight}px`);
+  document.documentElement.style.setProperty("--footer-h", `${footer.offsetHeight}px`);
+}).observe(topbar);
+new ResizeObserver(() => document.documentElement.style.setProperty("--footer-h", `${footer.offsetHeight}px`)).observe(footer);
+
 let searchTimer;
 $("#search").addEventListener("input", (ev) => {
   clearTimeout(searchTimer);
@@ -1270,6 +1581,7 @@ $("#themeBtn").addEventListener("click", () => {
 });
 
 $("#snapshotBtn").addEventListener("click", () => openAddList("mo2"));
+$("#nexusBtn").addEventListener("click", openNexusLookup);
 $("#filtersBtn").addEventListener("click", () => { $("#sidebar")?.classList.add("open"); $("#scrim").classList.add("open"); });
 
 // note field autosave
@@ -1299,7 +1611,8 @@ document.addEventListener("keydown", (ev) => {
     return;
   }
   if (ev.key === "Escape") {
-    if ($("#pop")) closePopover();
+    if (noteMenu) closeNoteMenu(true);
+    else if ($("#pop")) closePopover();
     else if (typing && S.selected && $("#drawer").contains(active)) active.blur(); // leave the comment box first
     else if (modalOpen) closeModal();
     else if (S.selected) closeDrawer();

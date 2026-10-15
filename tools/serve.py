@@ -14,6 +14,10 @@ user's lists, descriptions and decisions) and a small JSON API used by the app:
     POST /api/decisions               {key: {decision?, note?, name?, name_key?}} -> plan/decisions.json
     POST /api/freeze                  {name, frozen}
     POST /api/delete                  {name, confirm}  -> removes lists/<name>/ (decisions are kept)
+    POST /api/nexus/lookup            {domain, retry}  -> searches Nexus for name-only mods in the background
+    GET  /api/nexus/progress          the background search's progress
+    POST /api/nexus/stop              stops it after the current batch (results so far are kept)
+    POST /api/nexus/match             {domain, key, action: accept|reject|reset, id} -> data/nexus_match.json
 """
 
 import argparse
@@ -35,6 +39,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import modlist_lib as lib  # noqa: E402
 import import_files  # noqa: E402
+import nexus_match  # noqa: E402
 
 MAX_BODY = 60_000_000  # uploads arrive base64-encoded
 VALID_DECISIONS = {"keep", "drop", "maybe", ""}
@@ -42,6 +47,9 @@ VALID_DECISIONS = {"keep", "drop", "maybe", ""}
 # decisions are small and frequent, so they get their own lock and never wait on a snapshot.
 lists_lock = threading.Lock()
 decisions_lock = threading.Lock()
+# the Nexus name search runs in a background thread; the app polls its progress
+nexus_job = {"running": False, "stop": False, "domain": "", "done": 0, "total": 0, "counts": {}, "error": "", "finished": ""}
+nexus_job_lock = threading.Lock()
 
 
 def static_routes():
@@ -57,6 +65,7 @@ STATIC_FILES = {
     "/index.html": lambda: lib.REPO / "index.html",
     "/data/descriptions.json": lambda: lib.DESCRIPTIONS,
     "/plan/decisions.json": lambda: lib.DECISIONS,
+    "/data/nexus_match.json": lambda: nexus_match.MATCHES,
 }
 
 
@@ -175,6 +184,9 @@ class Handler(SimpleHTTPRequestHandler):
             if profiles is None:
                 return self.send_json(404, {"error": "No MO2 'profiles' folder found there."})
             return self.send_json(200, {"profiles": profiles})
+        if url.path == "/api/nexus/progress":
+            with nexus_job_lock:
+                return self.send_json(200, {k: v for k, v in nexus_job.items() if k != "stop"})
         if url.path.startswith("/api/"):
             return self.send_error(404)
         if resolve_static(url.path) is None:
@@ -217,6 +229,9 @@ class Handler(SimpleHTTPRequestHandler):
             "/api/decisions": self.save_decisions,
             "/api/freeze": self.freeze,
             "/api/delete": self.delete_list,
+            "/api/nexus/lookup": self.nexus_lookup,
+            "/api/nexus/stop": self.nexus_stop,
+            "/api/nexus/match": self.nexus_set_match,
         }
         handler = routes.get(urlparse(self.path).path)
         if not handler:
@@ -360,6 +375,61 @@ class Handler(SimpleHTTPRequestHandler):
         finally:
             lists_lock.release()
         return self.send_json(200, {"ok": True})
+
+
+    def nexus_lookup(self, body):
+        domain = str(body.get("domain", ""))
+        if not nexus_match.DOMAIN_RE.match(domain):
+            return self.send_json(400, {"error": "Game: the Nexus game name from its URL, e.g. skyrimspecialedition."})
+        retry = bool(body.get("retry"))
+        with nexus_job_lock:
+            if nexus_job["running"]:
+                return self.send_json(409, {"error": "A Nexus search is already running."})
+            nexus_job.update(running=True, stop=False, domain=domain, done=0, total=0, counts={}, error="", finished="")
+        threading.Thread(target=run_nexus_job, args=(domain, retry), daemon=True).start()
+        return self.send_json(200, {"ok": True})
+
+    def nexus_stop(self, body):
+        with nexus_job_lock:
+            nexus_job["stop"] = True
+        return self.send_json(200, {"ok": True})
+
+    def nexus_set_match(self, body):
+        domain, key, action = str(body.get("domain", "")), str(body.get("key", "")), str(body.get("action", ""))
+        if not nexus_match.DOMAIN_RE.match(domain) or not key.startswith("name:") or len(key) > 300:
+            return self.send_json(400, {"error": "Bad request."})
+        mod_id = body.get("id")
+        if action == "accept" and (not isinstance(mod_id, int) or isinstance(mod_id, bool)):
+            return self.send_json(400, {"error": "Bad mod id."})
+        try:
+            entry = nexus_match.set_status(domain, key, action, mod_id)
+        except KeyError:
+            return self.send_json(404, {"error": "No Nexus search result for that mod."})
+        except ValueError as e:
+            return self.send_json(400, {"error": str(e)})
+        return self.send_json(200, {"ok": True, "entry": entry})
+
+
+def run_nexus_job(domain: str, retry: bool):
+    def progress(done, total, counts):
+        with nexus_job_lock:
+            nexus_job.update(done=done, total=total, counts=dict(counts))
+
+    def should_stop():
+        with nexus_job_lock:
+            return nexus_job["stop"]
+
+    error = ""
+    try:
+        with nexus_job_lock:
+            nexus_job["total"] = len(nexus_match.pending(domain, retry))
+        nexus_match.run(domain, retry, progress=progress, should_stop=should_stop)
+    except nexus_match.RateLimited:
+        error = "Nexus is limiting requests. Results so far are saved; run it again later to continue."
+    except Exception as e:  # network trouble etc.: report it, keep what was saved
+        error = f"Search stopped: {e}. Results so far are saved; run it again to continue."
+    with nexus_job_lock:
+        nexus_job.update(running=False, error=error, finished=lib.now_iso())
 
 
 class Server(ThreadingHTTPServer):
