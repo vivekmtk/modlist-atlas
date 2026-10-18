@@ -653,7 +653,7 @@ function browseTable(groups) {
       html += `<tr class="${m.enabled ? "" : "disabled"}" tabindex="0" data-act="open" data-key="${esc(m.ck)}" data-list="${esc(m.list)}">
         ${S.bulk ? pickCell(m.ck, m.name) : ""}<td class="num tpri">${m.priority}</td><td class="tmod"><span class="tname">${esc(m.name)}</span>${reviewTag(rec)}</td><td class="tcat">${esc(catOf(m))}</td>
         ${showSec ? `<td class="muted">${esc(m.section)}</td>` : ""}<td class="muted">${esc(m.version)}</td><td>${dotsHTML(rec)}</td>
-        <td class="tdec">${d ? `<span class="dec ${d}">${d}</span> ` : ""}${quickHTML(m.ck)}</td>${noteCellHTML(m.ck)}<td><div class="tsum">${esc(sumOf(m))}</div></td></tr>`;
+        <td class="tdec">${quickHTML(m.ck)}${d ? `<span class="dec ${d}">${d}</span>` : ""}</td>${noteCellHTML(m.ck)}<td><div class="tsum">${esc(sumOf(m))}</div></td></tr>`;
     }
   }
   return html + (groups.size && [...groups.values()].some((g) => g.length) ? "" : noMatchRow()) + "</tbody></table></div>";
@@ -712,7 +712,7 @@ function renderCompare() {
             const tip = e ? `${e[0].name}${e[0].version ? " v" + e[0].version : ""}${e[0].enabled ? "" : " (disabled)"}` : "absent";
             return `<td class="lcol" title="${esc(l.name + ": " + tip)}"><span class="dots"><i class="ldot ${e ? "" : "off"} ${e && rec.vdiff ? "vdiff" : ""}" style="--c:${l.color};${e && !e[0].enabled ? "opacity:.45" : ""}"></i></span>${e && rec.vdiff && e[0].version ? `<span class="lver">${esc(e[0].version)}</span>` : ""}</td>`;
           }).join("")}
-          <td class="tdec">${d ? `<span class="dec ${d}">${d}</span> ` : ""}${quickHTML(rec.key)}</td>
+          <td class="tdec">${quickHTML(rec.key)}${d ? `<span class="dec ${d}">${d}</span>` : ""}</td>
           ${noteCellHTML(rec.key)}
           <td><div class="tsum">${esc(rec.summary || "")}</div></td></tr>`;
       }).join("")}${rows.length ? "" : noMatchRow()}${rows.length > shown.length ? `<tr class="more-tr"><td colspan="99"><div class="more-row"><span class="muted">Showing ${shown.length} of ${rows.length}</span> <button class="btn" data-act="more-rows">Show ${Math.min(500, rows.length - shown.length)} more</button></div></td></tr>` : ""}</tbody></table></div>`

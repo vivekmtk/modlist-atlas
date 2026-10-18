@@ -376,6 +376,7 @@ tr.subhead .sublabel { position: sticky; left: 12px; }
 .muted { color: var(--muted); }
 .dec { font: 600 var(--fs-2xs) var(--font-body); letter-spacing: .08em; text-transform: uppercase; }
 .dec.keep { color: var(--keep); } .dec.drop { color: var(--drop); } .dec.maybe { color: var(--maybe); }
+.tdec .dec { margin-left: 8px; } /* the decision word after the row buttons, apart from them */
 .quick { display: inline-flex; gap: 3px; vertical-align: middle; }
 .quick button { opacity: .5; transition: opacity .15s; }
 tr:hover .quick button, .quick:focus-within button, .quick button.on { opacity: 1; }
