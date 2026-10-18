@@ -7,8 +7,9 @@ to (a Wabbajack list, a guide, a friend's profile) so you can see what's shared,
 what's different. Then you decide, mod by mod or many at once, what to **keep**, **drop** or think
 about later.
 
-It runs on your own PC in your browser. It never changes your MO2 install, and it only goes online
-when you ask it to: with a Nexus API key, or when you click **Find on Nexus**.
+It runs on your own PC in your browser. It never changes your MO2 install, and it only contacts
+Nexus when you ask it to: **Fetch Nexus details** on a new snapshot, or **Find on Nexus**. After
+that, mod pictures load from Nexus as you browse.
 
 ![Compare view: mods in my setup but not in the Wabbajack list, with keep/drop decisions](docs/screenshots/compare.jpg)
 
@@ -50,9 +51,10 @@ others. Vortex lists aren't supported.
    - **Upload files**: drop in a profile's `modlist.txt` (plus `plugins.txt` and INIs if you have
      them), a whole profile folder, or a `.zip`. Use this for lists you haven't installed, for
      example one shared on Load Order Library or by a friend.
+   - **From other sessions**: reuse a list you already added to another session.
 
 Add at least two lists to compare them. To refresh a list after changing it in MO2, use
-**Re-snapshot** on the Overview page.
+**Re-snapshot** on the Overview page. **Remove** takes a list out of the session you're in.
 
 **Updating:** download the new ZIP and unzip it over your existing Modlist Atlas folder, replacing
 files when asked. Your lists, decisions and settings are kept. Don't unzip it to a new folder: the
@@ -92,7 +94,7 @@ In tables, the small **K / D / ?** buttons on each row (**?** is Maybe; hover a 
 name) do the same without opening the mod.
 
 Decisions follow the mod, not the list. A mod you marked *keep* shows as *keep* in every list that
-has it, and decisions survive re-snapshots and deleting lists. Each session has its own decisions.
+has it, and decisions survive re-snapshots and removing lists. Each session has its own decisions.
 
 ### Keep separate plans in sessions
 
@@ -101,18 +103,21 @@ decisions. Click the session name at the left of the list bar to switch sessions
 For example, keep your Skyrim plan while you start a Morrowind one, or try a second Skyrim plan
 on another base list.
 
-- **New session**: give it a name and a game. It starts with no decisions.
-- **Duplicate**: copies a session's decisions and setup under a new name. Use it to try a
+- **New session**: give it a name and a game. It starts with no lists and no decisions.
+- **Duplicate**: copies a session's lists, decisions and setup under a new name. Use it to try a
   variation without losing the original.
-- **Rename** and **Delete** do what they say. Deleting a session removes only its decisions. Your
-  lists stay.
+- **Rename** and **Delete** do what they say. Deleting a session removes only its decisions. Its
+  lists stay, so you can add them to other sessions.
 
-Lists are shared. A session shows every list for its game, so you add or re-snapshot a list once and
-use it in all of them. When you upload a list, choose its game (it defaults to the session's).
-**Find on Nexus** searches the session's game. The app reopens the session you used last.
+Each session has its own lists. A list you add or upload goes into the session you're in, for that
+session's game. To use it in another session too, add it there with **+ Add list → From other
+sessions**. The list is stored once, so a re-snapshot updates it in every session that has it.
+Removing a list from one session leaves it in the others. Its files are deleted only when no
+session has it any more, and the app asks first. **Find on Nexus** searches the session's game. The app reopens the session you used last.
 
 When you upgrade from a version without sessions, your existing decisions move into a session named
-*Default* for the game most of your lists are for. Rename it to whatever you like.
+*Default* for the game most of your lists are for. Rename it to whatever you like. When you upgrade
+from a version where lists were shared by game, each session keeps every list it showed before.
 
 ### Find uploaded mods on Nexus
 
@@ -129,7 +134,8 @@ for every such name:
 
 Results are saved, so each name is searched only once, and new lists only search their new names.
 A wrong automatic match can be undone from the mod's details. No API key is needed; only mod names
-are sent to Nexus.
+are sent to Nexus. With a Nexus API key, **Find on Nexus** then also fetches summaries, pictures
+and authors for the session's MO2 snapshots that don't have them yet.
 
 ### Decide on many mods at once
 
@@ -170,15 +176,19 @@ notepad .env        # MO2_PATH, MO2_PROFILE, MO2_LIST_NAME, NEXUS_API_KEY
 ```
 
 **Nexus API key** (nexusmods.com → Site preferences → API Keys): adds official one-line summaries
-and thumbnails. Without it, summaries come from the descriptions MO2 has already cached. Results
-are cached, so only new mods are looked up. The key is used only for your own lists (personal use,
+and thumbnails. Without it, summaries come from the descriptions MO2 has already cached. A snapshot
+never waits for Nexus: tick **Fetch Nexus details** when adding it to fetch them in the background,
+or click **Find on Nexus** later. Results are cached, so only new mods are looked up. The key is used only for your own lists (personal use,
 as Nexus's API policy allows).
 
 ## Privacy and safety
 
 - **Read-only towards MO2.** Snapshots copy files out; nothing is ever written back.
-- **Offline by default.** Without a Nexus key, it only reads your MO2 folder and the files you
-  upload. **Find on Nexus** sends mod names to Nexus only when you click it.
+- **Offline until you use Nexus.** It only reads your MO2 folder and the files you upload.
+  **Find on Nexus** and **Fetch Nexus details** contact Nexus only when you use them. Mod pictures
+  aren't downloaded: once a list has Nexus details, your browser loads each mod's picture from
+  Nexus's image servers when you view it, which shows those servers your IP address (not which page
+  you're on). Without Nexus details there are no pictures and nothing is loaded.
 - **Only on your PC.** The server listens on `localhost` only and refuses requests from other
   websites.
 - **No personal paths.** Absolute paths and your graphics card name are blanked in copied INIs.

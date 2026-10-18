@@ -9,16 +9,20 @@ user's lists, descriptions and decisions) and a small JSON API used by the app:
 
     GET  /api/status                  local mode, defaults, list sources, change flags, shared rules
     GET  /api/profiles?mo2=<folder>   profile names found in an MO2 folder
-    POST /api/snapshot                {mo2, profile, name, confirm}  -> runs export_modlist.py
-    POST /api/import                  {kind: "files", name, title, game, files: [{name, data(base64)}], confirm}
+    POST /api/snapshot                {mo2, profile, name, session?, details?, confirm}  -> runs export_modlist.py
+                                      without Nexus; details: then fetches the list's Nexus details in the background
+    POST /api/import                  {kind: "files", name, title, game, session?, files: [{name, data(base64)}], confirm}
     POST /api/decisions?session=<s>   {key: {decision?, note?, name?, name_key?}} -> plan/sessions/<s>/decisions.json
     POST /api/session/create          {title, game, from?}  -> a new session, empty or a copy of `from`
     POST /api/session/rename          {name, title}
     POST /api/session/delete          {name, confirm}  -> removes plan/sessions/<name>/ (never the last one)
-    POST /api/session/setup           {name, setup}  -> the session's lists and filters in the app
+    POST /api/session/setup           {name, setup}  -> the session's filters and view in the app
+    POST /api/session/add-list        {session, name}  -> adds an existing list to the session
+    POST /api/session/remove-list     {session, name, confirm}  -> takes a list out of the session;
+                                      removes lists/<name>/ when no other session has it (decisions are kept)
     POST /api/freeze                  {name, frozen}
-    POST /api/delete                  {name, confirm}  -> removes lists/<name>/ (decisions are kept)
-    POST /api/nexus/lookup            {domain, retry}  -> searches Nexus for name-only mods in the background
+    POST /api/nexus/lookup            {domain, retry, session?}  -> in the background, searches Nexus for name-only
+                                      mods, then (with NEXUS_API_KEY) fetches missing Nexus details for the session's lists
     GET  /api/nexus/progress          the background search's progress
     POST /api/nexus/stop              stops it after the current batch (results so far are kept)
     POST /api/nexus/match             {domain, key, action: accept|reject|reset, id} -> data/nexus_match.json
@@ -52,8 +56,10 @@ VALID_DECISIONS = {"keep", "drop", "maybe", ""}
 lists_lock = threading.Lock()
 plan_lock = threading.Lock()
 MAX_SETUP = 50_000  # characters of the app's saved lists and filters
-# the Nexus name search runs in a background thread; the app polls its progress
-nexus_job = {"running": False, "stop": False, "domain": "", "done": 0, "total": 0, "counts": {}, "error": "", "finished": ""}
+# the Nexus name search and details fetch run in a background thread; the app polls its progress.
+# phase: "names" (the name search) or "details" (summaries, pictures, authors from the Nexus API)
+nexus_job = {"running": False, "stop": False, "domain": "", "phase": "names", "done": 0, "total": 0, "counts": {},
+             "error": "", "finished": ""}
 nexus_job_lock = threading.Lock()
 
 
@@ -238,7 +244,8 @@ class Handler(SimpleHTTPRequestHandler):
             "/api/import": self.import_list,
             "/api/decisions": self.save_decisions,
             "/api/freeze": self.freeze,
-            "/api/delete": self.delete_list,
+            "/api/session/add-list": self.add_list,
+            "/api/session/remove-list": self.remove_list,
             "/api/nexus/lookup": self.nexus_lookup,
             "/api/nexus/stop": self.nexus_stop,
             "/api/nexus/match": self.nexus_set_match,
@@ -257,25 +264,55 @@ class Handler(SimpleHTTPRequestHandler):
     def busy(self):
         return self.send_json(409, {"error": "Another snapshot or import is running; try again when it finishes."})
 
+    def target_session(self, body):
+        """The session a new list goes into: None when none is named (older callers), False when
+        the named one doesn't exist (after answering 404)."""
+        if not body.get("session"):
+            return None
+        session = lib.read_session(str(body["session"]))
+        if not session:
+            self.send_json(404, {"error": "Unknown session; reload the page."})
+            return False
+        return session
+
+    @staticmethod
+    def shared_note(name, session):
+        """Replacing a list changes it in every session that has it: say which other ones do."""
+        others = [s["title"] for s in lib.sessions_using(name) if not session or s["name"] != session["name"]]
+        return f" It's also in {', '.join(others)}, which will get the new version too." if others else ""
+
+    @staticmethod
+    def add_to_session(session, name):
+        if session:
+            with plan_lock:
+                current = lib.read_session(session["name"])
+                if current:
+                    lib.add_session_list(current, name)
+
     def import_list(self, body):
         name = str(body.get("name", ""))
         if not lib.valid_name(name):
             return self.send_json(400, {"error": lib.NAME_ERROR})
+        session = self.target_session(body)
+        if session is False:
+            return
         if not lists_lock.acquire(blocking=False):
             return self.busy()
         try:
             info = lib.read_json(lib.LISTS / name / "info.json", None)
             if info and not body.get("confirm"):
                 extra = " It is frozen." if info.get("frozen") else ""
-                return self.send_json(409, {"confirm": f"A list named '{name}' already exists ({info.get('mods')} mods).{extra} Replace it?"})
+                return self.send_json(409, {"confirm": f"A list named '{name}' already exists ({info.get('mods')} mods).{extra}"
+                                                       f"{self.shared_note(name, session)} Replace it?"})
             try:
                 if body.get("kind") == "files":
                     named = {}
                     for f in body.get("files") or []:
                         if isinstance(f, dict):
                             named[str(f.get("name", ""))[:260]] = base64.b64decode(str(f.get("data", "")))
+                    # a list uploaded into a session is for that session's game
                     result = import_files.import_files(named, name, str(body.get("title", ""))[:200],
-                                                       game=str(body.get("game", "")))
+                                                       game=session["game"] if session else str(body.get("game", "")))
                 else:
                     return self.send_json(400, {"error": "Unknown import kind."})
             except (ValueError, zipfile.BadZipFile, binascii.Error) as e:
@@ -284,6 +321,7 @@ class Handler(SimpleHTTPRequestHandler):
             sources = lib.read_json(lib.LOCAL_SOURCES, {})
             if sources.pop(name, None):
                 lib.write_json(lib.LOCAL_SOURCES, sources)
+            self.add_to_session(session, name)
             return self.send_json(200, {"ok": True, "output": f"Imported '{name}': {result['mods']} mods in {result['sections']} sections."})
         finally:
             lists_lock.release()
@@ -299,27 +337,37 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_json(400, {"error": f"No MO2 'profiles' folder in {mo2}"})
         if profile not in profiles:
             return self.send_json(400, {"error": f"Profile '{profile}' not found in {mo2}"})
+        session = self.target_session(body)
+        if session is False:
+            return
         info = lib.read_json(lib.LISTS / name / "info.json", {})
+        shared = self.shared_note(name, session)
         if info.get("source") in ("upload", "loadorderlibrary") and not body.get("confirm"):  # incl. older imports
-            return self.send_json(409, {"confirm": f"'{name}' was imported, not snapshotted. Replace it with this MO2 profile?"})
+            return self.send_json(409, {"confirm": f"'{name}' was imported, not snapshotted.{shared} Replace it with this MO2 profile?"})
         if info.get("frozen") and not body.get("confirm"):
-            return self.send_json(409, {"confirm": f"'{name}' is frozen. Overwrite it anyway?"})
+            return self.send_json(409, {"confirm": f"'{name}' is frozen.{shared} Overwrite it anyway?"})
         # refreshing a list from its own profile needs no question; replacing a different list does
         src = lib.read_json(lib.LOCAL_SOURCES, {}).get(name) or {}
         same_source = src.get("mo2") == str(mo2) and src.get("profile") == profile
         if info and not same_source and not body.get("confirm"):
-            return self.send_json(409, {"confirm": f"A list named '{name}' already exists ({info.get('mods')} mods). Replace it with '{profile}'?"})
+            return self.send_json(409, {"confirm": f"A list named '{name}' already exists ({info.get('mods')} mods).{shared} Replace it with '{profile}'?"})
         if not lists_lock.acquire(blocking=False):
             return self.busy()
         try:
+            # Nexus details are fetched in the background afterwards (if asked), not while the user waits
             cmd = [sys.executable, str(lib.REPO / "tools" / "export_modlist.py"),
-                   "--mo2", str(mo2), "--profile", profile, "--name", name]
+                   "--mo2", str(mo2), "--profile", profile, "--name", name, "--no-api"]
             proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
                                   errors="replace", cwd=lib.REPO)
         finally:
             lists_lock.release()
         ok = proc.returncode == 0
-        return self.send_json(200 if ok else 500, {"ok": ok, "output": (proc.stdout + proc.stderr)[-6000:]})
+        details = False
+        if ok:
+            self.add_to_session(session, name)
+            if body.get("details") and os.environ.get("NEXUS_API_KEY"):
+                details = start_nexus_job("", False, names=False, details=[name])
+        return self.send_json(200 if ok else 500, {"ok": ok, "details": details, "output": (proc.stdout + proc.stderr)[-6000:]})
 
     def save_decisions(self, body, session):
         """Merge only the fields sent, so a comment save can't undo a decision (or vice versa)."""
@@ -359,7 +407,7 @@ class Handler(SimpleHTTPRequestHandler):
         if not title:
             return self.send_json(400, {"error": "Give the session a name."})
         with plan_lock:
-            setup, decisions = {}, {}
+            setup, decisions, lists = {}, {}, []
             if body.get("from"):
                 src = lib.read_session(str(body["from"]))
                 if not src:
@@ -368,10 +416,10 @@ class Handler(SimpleHTTPRequestHandler):
                     decisions = lib.read_json(lib.session_decisions(src["name"]), {}, strict=True)
                 except lib.CorruptFile as e:
                     return self.send_json(500, {"error": f"Not copied: {e}"})
-                game, setup = src["game"], src.get("setup") or {}
+                game, setup, lists = src["game"], src.get("setup") or {}, src.get("lists", [])
             if not lib.GAME_RE.match(game):
                 return self.send_json(400, {"error": "Game: the Nexus game name from its URL, e.g. skyrimspecialedition."})
-            session = lib.create_session(title, game, setup, decisions)
+            session = lib.create_session(title, game, setup, decisions, lists)
         return self.send_json(200, {"ok": True, "session": session})
 
     def rename_session(self, body):
@@ -388,7 +436,7 @@ class Handler(SimpleHTTPRequestHandler):
         return self.send_json(200, {"ok": True})
 
     def delete_session(self, body):
-        """Always asks first (409 + confirm). Lists are shared, so only the session's decisions go."""
+        """Always asks first (409 + confirm). Only the session goes: its lists stay, to add to other sessions."""
         with plan_lock:
             session = lib.read_session(str(body.get("name", "")))
             if not session:
@@ -398,7 +446,7 @@ class Handler(SimpleHTTPRequestHandler):
             if not body.get("confirm"):
                 n = len(lib.read_json(lib.session_decisions(session["name"]), {}))
                 return self.send_json(409, {"confirm": f"Delete the session '{session['title']}' and its {n} decision{'' if n == 1 else 's'}? "
-                                                       "Your lists are kept. This can't be undone."})
+                                                       "Its lists stay available to add to other sessions. This can't be undone."})
             try:
                 shutil.rmtree(lib.SESSIONS / session["name"])
             except OSError as e:
@@ -435,8 +483,20 @@ class Handler(SimpleHTTPRequestHandler):
             lists_lock.release()
         return self.send_json(200, {"ok": True})
 
-    def delete_list(self, body):
-        """Always asks first (409 + confirm). Decisions are keyed by mod, not list, so they stay."""
+    def add_list(self, body):
+        name = str(body.get("name", ""))
+        if not lib.valid_name(name) or not (lib.LISTS / name / "info.json").is_file():
+            return self.send_json(404, {"error": "Unknown list."})
+        with plan_lock:
+            session = lib.read_session(str(body.get("session", "")))
+            if not session:
+                return self.send_json(404, {"error": "Unknown session; reload the page."})
+            lib.add_session_list(session, name)
+        return self.send_json(200, {"ok": True})
+
+    def remove_list(self, body):
+        """Takes a list out of one session. When no other session has it, its files are deleted too,
+        so that asks first (409 + confirm). Decisions are keyed by mod, not list, so they stay."""
         name = str(body.get("name", ""))
         folder = lib.LISTS / name
         if not lib.valid_name(name) or not (folder / "info.json").is_file():
@@ -444,11 +504,21 @@ class Handler(SimpleHTTPRequestHandler):
         if not lists_lock.acquire(blocking=False):
             return self.busy()
         try:
-            info = lib.read_json(folder / "info.json", {})
-            if not body.get("confirm"):
-                extra = " It is frozen." if info.get("frozen") else ""
-                return self.send_json(409, {"confirm": f"Delete the list '{name}' ({info.get('mods')} mods)?{extra} "
-                                                       "Your decisions are kept. This can't be undone."})
+            with plan_lock:
+                session = lib.read_session(str(body.get("session", "")))
+                if not session or name not in session.get("lists", []):
+                    return self.send_json(404, {"error": "That list isn't in this session; reload the page."})
+                others = [s["title"] for s in lib.sessions_using(name) if s["name"] != session["name"]]
+                if not others and not body.get("confirm"):
+                    info = lib.read_json(folder / "info.json", {})
+                    extra = " It is frozen." if info.get("frozen") else ""
+                    return self.send_json(409, {"confirm": f"Remove the list '{name}' ({info.get('mods')} mods)?{extra} No other session "
+                                                           "has it, so its files are deleted. Your decisions are kept. This can't be undone."})
+                session["lists"].remove(name)
+                lib.write_session(session)
+                lib.rebuild_sessions_index()
+            if others:
+                return self.send_json(200, {"ok": True, "kept_in": others})
             try:
                 shutil.rmtree(folder)
             except OSError as e:
@@ -460,19 +530,22 @@ class Handler(SimpleHTTPRequestHandler):
                 lib.write_json(lib.LOCAL_SOURCES, sources)
         finally:
             lists_lock.release()
-        return self.send_json(200, {"ok": True})
-
+        return self.send_json(200, {"ok": True, "kept_in": []})
 
     def nexus_lookup(self, body):
         domain = str(body.get("domain", ""))
         if not nexus_match.DOMAIN_RE.match(domain):
             return self.send_json(400, {"error": "Game: the Nexus game name from its URL, e.g. skyrimspecialedition."})
-        retry = bool(body.get("retry"))
-        with nexus_job_lock:
-            if nexus_job["running"]:
-                return self.send_json(409, {"error": "A Nexus search is already running."})
-            nexus_job.update(running=True, stop=False, domain=domain, done=0, total=0, counts={}, error="", finished="")
-        threading.Thread(target=run_nexus_job, args=(domain, retry), daemon=True).start()
+        session = self.target_session(body)
+        if session is False:
+            return
+        # details come from the Nexus API, so only with a key; only snapshots have the Nexus IDs to look up
+        details = []
+        if session and os.environ.get("NEXUS_API_KEY"):
+            details = [i["name"] for i in lib.read_json(lib.LISTS / "index.json", [])
+                       if i["name"] in session.get("lists", []) and i.get("source") == "mo2"]
+        if not start_nexus_job(domain, bool(body.get("retry")), details=details):
+            return self.send_json(409, {"error": "A Nexus search is already running."})
         return self.send_json(200, {"ok": True})
 
     def nexus_stop(self, body):
@@ -496,10 +569,25 @@ class Handler(SimpleHTTPRequestHandler):
         return self.send_json(200, {"ok": True, "entry": entry})
 
 
-def run_nexus_job(domain: str, retry: bool):
+def start_nexus_job(domain: str, retry: bool, names: bool = True, details=()) -> bool:
+    """False when a job is already running."""
+    with nexus_job_lock:
+        if nexus_job["running"]:
+            return False
+        nexus_job.update(running=True, stop=False, domain=domain, phase="names" if names else "details",
+                         done=0, total=0, counts={}, error="", finished="")
+    threading.Thread(target=run_nexus_job, args=(domain, retry, names, list(details)), daemon=True).start()
+    return True
+
+
+def run_nexus_job(domain: str, retry: bool, names: bool = True, details=()):
     def progress(done, total, counts):
         with nexus_job_lock:
             nexus_job.update(done=done, total=total, counts=dict(counts))
+
+    def details_progress(done, total):
+        with nexus_job_lock:
+            nexus_job.update(done=done, total=total)
 
     def should_stop():
         with nexus_job_lock:
@@ -507,13 +595,26 @@ def run_nexus_job(domain: str, retry: bool):
 
     error = ""
     try:
-        with nexus_job_lock:
-            nexus_job["total"] = len(nexus_match.pending(domain, retry))
-        nexus_match.run(domain, retry, progress=progress, should_stop=should_stop)
+        if names:
+            with nexus_job_lock:
+                nexus_job["total"] = len(nexus_match.pending(domain, retry))
+            nexus_match.run(domain, retry, progress=progress, should_stop=should_stop)
+        if details and not should_stop():
+            with nexus_job_lock:
+                nexus_job.update(phase="details", done=0, total=0)
+            mods = [m for n in details for m in lib.read_json(lib.LISTS / n / "mods.json", [])]
+            lib.fetch_nexus(mods, os.environ.get("NEXUS_API_KEY", ""), progress=details_progress, should_stop=should_stop)
     except nexus_match.RateLimited:
         error = "Nexus is limiting requests. Results so far are saved; run it again later to continue."
     except Exception as e:  # network trouble etc.: report it, keep what was saved
         error = f"Search stopped: {e}. Results so far are saved; run it again to continue."
+    if details:
+        with lists_lock:  # waits for a running snapshot or import
+            for n in details:
+                try:
+                    lib.reapply_nexus_cache(n)
+                except (OSError, ValueError) as e:
+                    error = error or f"Could not update '{n}' with the Nexus details: {e}"
     with nexus_job_lock:
         nexus_job.update(running=False, error=error, finished=lib.now_iso())
 
@@ -527,6 +628,7 @@ class Server(ThreadingHTTPServer):
 def make_server(port: int) -> ThreadingHTTPServer:
     lib.rebuild_index()
     lib.migrate_to_sessions()
+    lib.migrate_session_lists()
     return Server(("127.0.0.1", port), Handler)
 
 

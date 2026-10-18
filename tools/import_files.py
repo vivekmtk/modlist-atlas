@@ -73,7 +73,7 @@ def import_files(named: dict, name: str, title: str = "", origin: str = "", game
     return lib.build_text_list(name, files, {
         "title": title or name,
         "source": "upload",
-        "game": game,  # uploads have no Nexus IDs to tell; '' shows the list in every session
+        "game": game,  # uploads have no Nexus IDs to tell; '' fits a session for any game
         "source_label": "Uploaded profile files" + (f" ({origin})" if origin else ""),
         "uploaded_files": sorted(files),
     })

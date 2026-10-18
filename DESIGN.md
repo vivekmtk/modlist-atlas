@@ -41,8 +41,16 @@ index.html + web/app.{js,css}  ◄── fetch ───────────
 - **Never write to MO2.** Snapshots copy files out; nothing goes back.
 - **No third-party APIs except Nexus, and only when asked.** Lists from websites are added by
   uploading their `modlist.txt`, so the tool doesn't depend on any site's unpublished API. Nexus is
-  contacted only with an API key (exports) or when the user clicks **Find on Nexus**; otherwise the
-  tool makes no network requests at all.
+  contacted only when the user asks: **Find on Nexus**, **Fetch Nexus details** on a new snapshot,
+  or a command-line export with an API key. Mod pictures are stored as Nexus URLs, not downloaded,
+  so the browser loads them from Nexus while the user views lists that have Nexus details;
+  otherwise the tool makes no network requests at all.
+- **Snapshots never wait for Nexus.** The app's snapshots run the exporter with `--no-api`, so a
+  list is saved in seconds. Nexus details (summaries, pictures, authors) are fetched in the same
+  background job as the name search, either for the new list (the snapshot's checkbox) or for the
+  session's MO2 snapshots (**Find on Nexus**, after the name search). When it finishes, each list is
+  rewritten from the cache and its own copy of `modlist.txt`, without reading MO2 again, so a
+  changed MO2 profile is never snapshotted behind the user's back.
 - **Name search: automatic only when unambiguous.** A name-only mod is linked automatically only
   when exactly one Nexus mod in that game has that exact title. Similar titles (all words present),
   and searches on a trimmed name (`X - BSA Version` → `X`), are only suggestions for the user to
@@ -62,13 +70,18 @@ index.html + web/app.{js,css}  ◄── fetch ───────────
   a Nexus key when any other list has a mod with the same normalized name, and borrows its link,
   category and description. Several MO2 mods can share one Nexus key (main file + optional files);
   they're shown as one record with "+N files" in Compare.
-- **Sessions separate plans; lists are shared.** A session is a name, a game, the app's setup
-  (lists, filters) and its own decisions, in `plan/sessions/<name>/`. Lists aren't owned by a
-  session: each list records its game (`info.json: game`, from MO2, or chosen on upload) and shows
-  in every session for that game, so a list is snapshotted once and used in several plans. A list
-  with no game (older CLI imports) shows in every session. The session's game also scopes Find on
-  Nexus, so one game's name matches never apply to another's lists. The folder name is derived
-  from the title, so users only ever see titles. Duplicate copies decisions and setup; deleting
+- **Sessions separate plans, including their lists.** A session is a name, a game, its lists
+  (`session.json: lists`), the app's setup (filters, view) and its own decisions, in
+  `plan/sessions/<name>/`. A snapshot or upload made in the app goes into the open session (an
+  upload takes the session's game); a list can be added to other sessions. Lists are still stored
+  once in `lists/`, so adding one to another session copies nothing and a re-snapshot updates it
+  in every session that has it; the server says which other sessions a replace affects. Removing a
+  list takes it out of one session; its files go only when no session has it, after asking.
+  Deleting a session keeps its lists, and lists made on the command line start in no session;
+  both can be added from the app. Sessions saved before lists belonged to sessions get, on start,
+  the lists they showed then: every list for their game and lists with no game. The session's game
+  also scopes Find on Nexus, so one game's name matches never apply to another's lists. The folder name is derived
+  from the title, so users only ever see titles. Duplicate copies lists, decisions and setup; deleting
   keeps at least one session. Which session is open is remembered per browser; the setup is saved
   on disk with the session.
 - **Upgrading moves, never drops, decisions.** On start, if no session exists but lists or the old

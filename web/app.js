@@ -25,8 +25,8 @@ const UI_DEFAULTS = {
   allCats: false, allSecs: false, ovBase: null, chartAll: false,
 };
 const S = {
-  // a session is one plan: its game, its lists and filters (ui) and its decisions. allLists holds every
-  // game's lists; lists only the session's game (and lists with no game)
+  // a session is one plan: its game, its lists, its filters (ui) and its decisions. allLists holds every
+  // list on disk; lists only the session's
   sessions: [], session: null, allLists: [],
   lists: [], data: {}, decisions: {}, local: null, descriptions: null, catalog: new Map(),
   // Nexus search results; names another list has an ID for; Comment column filter (null = all, else the ticked comments)
@@ -100,7 +100,7 @@ async function loadSession() {
 async function loadAll() {
   await loadSession();
   S.allLists = await getJSON("lists/index.json");
-  S.lists = S.session ? S.allLists.filter((l) => !l.game || l.game === gameOf()) : [];
+  S.lists = S.session ? S.allLists.filter((l) => (S.session.lists || []).includes(l.name)) : [];
   assignColors();
   S.data = {};
   await Promise.all(S.lists.map(async (l) => {
@@ -135,9 +135,9 @@ function firstRunHTML() {
           You can add more sessions later, for another game or another plan.`)}${sessionFormHTML()}</div>`
       : emptyState("No sessions yet", "Start the local server (<code>Modlist Atlas.bat</code> or <code>python tools/serve.py</code>) to create one.");
   }
-  const other = S.allLists.length ? ` Lists for other games show in sessions for those games.` : "";
+  const other = addableLists().length ? ` Or add a list you already have from another session.` : "";
   return S.local
-    ? emptyState(`No ${gameLabel(gameOf())} lists yet`, `Add a snapshot of an MO2 profile, or upload profile files (a folder, a .zip, or a modlist.txt).${other}
+    ? emptyState("No lists in this session yet", `Add a snapshot of an MO2 profile, or upload profile files (a folder, a .zip, or a modlist.txt).${other}
         <div class="empty-actions"><button class="btn primary" data-act="add-list">+ Add your first list</button></div>`)
     : emptyState("No lists yet", "Start the local server (<code>Modlist Atlas.bat</code> or <code>python tools/serve.py</code>) to add lists.");
 }
@@ -239,6 +239,8 @@ function resolveDecisionKeys() {
 const decKey = (key) => S.catalog.get(key)?.dk || key;
 const decOf = (key) => S.decisions[decKey(key)] || null;
 const listByName = (n) => S.lists.find((l) => l.name === n);
+// lists on disk this session doesn't have (from other sessions, or the command line), for its game
+const addableLists = () => S.allLists.filter((l) => !(S.session?.lists || []).includes(l.name) && (!l.game || l.game === gameOf()));
 
 // ------------------------------------------------------------------ filtering
 
@@ -732,7 +734,7 @@ function renderOverview() {
     const acts = [`<button class="btn" data-act="goto-browse" data-list="${esc(l.name)}">Browse</button>`];
     if (S.local && src) acts.push(`<button class="btn" data-act="resnap" data-list="${esc(l.name)}">Re-snapshot</button>`);
     if (S.local) acts.push(`<button class="btn ghost" data-act="freeze" data-list="${esc(l.name)}">${l.frozen ? "Unfreeze" : "Freeze"}</button>`);
-    if (S.local) acts.push(`<button class="btn ghost danger" data-act="delete-list" data-list="${esc(l.name)}">Delete</button>`);
+    if (S.local) acts.push(`<button class="btn ghost danger" data-act="remove-list" data-list="${esc(l.name)}">Remove</button>`);
     const srcUrl = safeUrl(l.website) || safeUrl(l.url);
     // the title only when it says more than the name (MO2 snapshots are titled "<name> — MO2 profile …")
     const title = l.title && l.title !== l.name && !l.title.startsWith(l.name + " — ") ? l.title : "";
@@ -1012,10 +1014,11 @@ function trapFocus(ev, container) {
 }
 
 function nameHelp(n) {
-  const l = listByName(n);
+  const l = S.allLists.find((x) => x.name === n);
   if (!n) return "Lowercase letters, digits, <code>.</code> <code>_</code> <code>-</code>.";
   if (!nameRule().test(n)) return `<span class="err">Use lowercase letters, digits, . _ - only.</span>`;
-  return l ? `Replaces <b>${esc(n)}</b> (${l.mods} mods, ${esc(relTime(l.generated))})${l.frozen ? " — <b>frozen</b>, you'll be asked to confirm" : ""}.`
+  const elsewhere = l && !listByName(n) ? " It's in another session, which will get the new version too." : "";
+  return l ? `Replaces <b>${esc(n)}</b> (${l.mods} mods, ${esc(relTime(l.generated))})${l.frozen ? " — <b>frozen</b>, you'll be asked to confirm" : ""}.${elsewhere}`
     : `Creates a new list <b>${esc(n)}</b>.`;
 }
 
@@ -1028,7 +1031,7 @@ function nameField(id, value) {
 function openAddList(tab = "mo2", prefill = {}) {
   modalTab = tab;
   uploads = [];
-  const tabs = [["mo2", "MO2 profile"], ["upload", "Upload files"]];
+  const tabs = [["mo2", "MO2 profile"], ["upload", "Upload files"], ...(addableLists().length ? [["existing", "From other sessions"]] : [])];
   openModal(`<div class="modal-head"><h2 id="modalTitle">Add or update a list</h2><button class="btn icon ghost" data-act="modal-close" aria-label="Close">×</button></div>
     <div class="modal-tabs" role="tablist">${tabs.map(([v, t]) => `<button role="tab" aria-selected="${v === tab}" data-act="modal-tab" data-v="${v}">${t}</button>`).join("")}</div>
     <div class="modal-body" id="modalBody"></div>`);
@@ -1039,7 +1042,7 @@ function renderModalTab(prefill = {}) {
   document.querySelectorAll(".modal-tabs button").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.v === modalTab)));
   const body = $("#modalBody");
   if (modalTab === "mo2") {
-    const recent = Object.entries(S.local?.lists || {});
+    const recent = Object.entries(S.local?.lists || {}).filter(([n]) => listByName(n));
     body.innerHTML = `<p class="intro">Copies a profile's modlist, plugins and INIs from a Mod Organizer 2 install into <code>lists/&lt;name&gt;/</code>, with Nexus links, categories and descriptions from each mod. MO2 is only read, never changed.</p>
       ${recent.length ? `<div class="field"><label>Refresh an existing snapshot</label><div class="recent">${recent.map(([n, s]) =>
         `<button data-act="snap-recent" data-list="${esc(n)}"><span><b>${esc(n)}</b> <span class="muted">← ${esc(s.profile)} · ${esc(s.mo2)}</span></span>
@@ -1048,6 +1051,7 @@ function renderModalTab(prefill = {}) {
         <div class="help">The Mod Organizer 2 folder that contains <code>mods</code> and <code>profiles</code>.</div><div class="err" id="snapMo2Err"></div></div>
       <div class="field"><label for="snapProfile">Profile</label><select id="snapProfile"></select></div>
       ${nameField("snapName", prefill.name || "")}
+      ${S.local.nexus_key ? `<label class="check"><input type="checkbox" id="snapDetails"> Fetch Nexus details (summaries, pictures, authors) in the background after saving</label>` : ""}
       <div class="modal-actions"><button class="btn ghost" data-act="modal-close">Cancel</button><button class="btn primary" id="goBtn" data-act="snap-go">Snapshot</button></div>
       <div id="modalLog"></div>`;
     loadProfiles(prefill.profile || S.local.profile);
@@ -1066,7 +1070,6 @@ function renderModalTab(prefill = {}) {
       </div>
       <div class="file-chips" id="fileChips"></div>
       ${nameField("upName", prefill.name || "")}
-      ${gameFieldHTML("upGame", gameOf(), "The list shows in sessions for this game.")}
       <div class="field"><label for="upTitle">Title (optional)</label><input id="upTitle" placeholder="e.g. Friend's survival list" maxlength="200"></div>
       <div class="help upload-note">Without the mods folder there are no Nexus IDs; mods are matched to your other lists by name.</div>
       <div class="modal-actions"><button class="btn ghost" data-act="modal-close">Cancel</button><button class="btn primary" id="goBtn" data-act="import-files">Import</button></div>
@@ -1081,6 +1084,13 @@ function renderModalTab(prefill = {}) {
     $("#fileInput").addEventListener("change", (e) => addUploads([...e.target.files]));
     $("#folderInput").addEventListener("change", (e) => addUploads([...e.target.files]));
     renderUploads();
+  } else if (modalTab === "existing") {
+    const inSessions = (n) => S.sessions.filter((x) => x.lists?.includes(n)).map((x) => x.title);
+    body.innerHTML = `<p class="intro">Lists already on this PC that this session doesn't have. A list is stored once: adding it here doesn't copy it, and re-snapshotting it updates it in every session that has it.</p>
+      <div class="recent">${addableLists().map((l) => {
+        const used = inSessions(l.name);
+        return `<button data-act="add-existing" data-list="${esc(l.name)}"><span><b>${esc(l.name)}</b> <span class="muted">${l.mods} mods · ${used.length ? `in ${esc(used.join(", "))}` : "in no session"}</span></span><span class="ok">Add</span></button>`;
+      }).join("")}</div>`;
   }
   document.querySelectorAll(".list-name").forEach((el) => el.addEventListener("input", () => updateNameHelp(el)));
 }
@@ -1162,16 +1172,11 @@ async function postWithConfirm(url, body, onDone) {
     if (!r.ok || !j.ok) throw new Error(j.error || "Failed — see the log.");
     await loadAll();
     closeModal();
-    const added = S.allLists.find((l) => l.name === body.name);
-    if (added && !S.lists.includes(added)) {
-      render();
-      toast(`${onDone}. It's a ${gameLabel(added.game)} list, so it shows in your ${gameLabel(added.game)} sessions.`);
-      return;
-    }
     S.ui.primary = body.name;
     S.ui.tab = "browse";
     render();
-    toast(onDone);
+    if (j.details) watchNexusLookup();
+    toast(j.details ? `${onDone}. Fetching its Nexus details in the background.` : onDone);
   } catch (e) {
     go.disabled = false; go.textContent = label;
     toast(e.message);
@@ -1205,30 +1210,41 @@ function suggestSnapName() {
 }
 
 function runSnapshot() {
-  const body = { mo2: $("#snapMo2").value.trim(), profile: $("#snapProfile").value, name: $("#snapName").value.trim() };
-  $("#modalLog").innerHTML = `<div class="log">Reading ${esc(body.profile)} from ${esc(body.mo2)}…${S.local.nexus_key ? "\nNew mods are looked up on Nexus; the first run can take a few minutes." : ""}</div>`;
+  const body = { mo2: $("#snapMo2").value.trim(), profile: $("#snapProfile").value, name: $("#snapName").value.trim(), session: S.session.name,
+    details: !!$("#snapDetails")?.checked };
+  $("#modalLog").innerHTML = `<div class="log">Reading ${esc(body.profile)} from ${esc(body.mo2)}…</div>`;
   postWithConfirm("api/snapshot", body, `Snapshot '${body.name}' saved`);
 }
 
 async function runImportFiles() {
   if (!uploads.length) { toast("Pick the profile files first"); return; }
   const files = await Promise.all(uploads.map(async (f) => ({ name: f.name, data: await readB64(f) })));
-  const body = { kind: "files", name: $("#upName").value.trim(), title: $("#upTitle").value.trim(), game: gameValue("upGame"), files };
+  const body = { kind: "files", name: $("#upName").value.trim(), title: $("#upTitle").value.trim(), session: S.session.name, files };
   postWithConfirm("api/import", body, `Imported '${body.name}'`);
 }
 
-async function deleteList(name, confirm = false) {
+async function addExistingList(name) {
   try {
-    const r = await fetch("api/delete", { method: "POST", headers: API_HEADERS, body: JSON.stringify({ name, confirm }) });
-    const j = await r.json().catch(() => ({ error: `HTTP ${r.status}` }));
-    if (r.status === 409 && j.confirm) {
-      if (window.confirm(j.confirm)) return deleteList(name, true);
-      return;
-    }
-    if (!r.ok || !j.ok) throw new Error(j.error || "Could not delete the list");
+    await postSession("add-list", { session: S.session.name, name });
+    closeModal();
+    await loadAll();
+    S.ui.primary = name;
+    S.ui.tab = "browse";
+    render();
+    toast(`Added '${name}'`);
+  } catch (e) {
+    toast(e.message);
+  }
+}
+
+// out of this session only; the server deletes the files (after asking) when no other session has it
+async function removeList(name) {
+  try {
+    const j = await postSession("remove-list", { session: S.session.name, name });
+    if (!j) return;
     await loadAll();
     render();
-    toast(`Deleted '${name}'`);
+    toast(j.kept_in.length ? `Removed '${name}' from this session. It's still in ${j.kept_in.join(", ")}.` : `Removed '${name}'`);
   } catch (e) {
     toast(e.message);
   }
@@ -1293,7 +1309,7 @@ function openSessions() {
       <b>${esc(x.title)}</b><span class="muted">${esc(gameLabel(x.game))}${cur ? " · open" : ""}</span></button>${acts}</div>`;
   }).join("");
   openModal(`<div class="modal-head"><h2 id="modalTitle">Sessions</h2><button class="btn icon ghost" data-act="modal-close" aria-label="Close">×</button></div>
-    <div class="modal-body"><p class="intro">Each session is one plan for one game, with its own lists, filters and keep / drop decisions. Lists are shared: a list shows in every session for its game.</p>
+    <div class="modal-body"><p class="intro">Each session is one plan for one game, with its own lists, filters and keep / drop decisions. Removing a list from one session leaves it in the others.</p>
       <div class="ses-list">${rows}</div>
       ${S.local ? `<h3 class="ses-new">New session</h3>${sessionFormHTML()}` : ""}</div>`);
 }
@@ -1386,15 +1402,23 @@ function nexusSummary() {
   for (const k of names) if (game[k]) { cached++; if (game[k].status === "none") misses++; }
   const todo = names.size - cached + (retry ? misses : 0);
   const mins = Math.ceil((todo / 12) * 3 / 60);
+  const details = S.local?.nexus_key ? missingDetails() : 0;
   return `<b>${names.size.toLocaleString()}</b> mod names have no Nexus ID · <b>${cached.toLocaleString()}</b> already searched${misses ? ` (${misses.toLocaleString()} not found)` : ""} ·
-    <b>${todo.toLocaleString()}</b> to search${todo ? ` (about ${mins} min)` : ""}`;
+    <b>${todo.toLocaleString()}</b> to search${todo ? ` (about ${mins} min)` : ""}${S.local?.nexus_key ? ` · <b>${details.toLocaleString()}</b> mods with a Nexus ID to fetch details for${details ? ` (about ${Math.ceil(details * 0.5 / 60)} min)` : ""}` : ""}`;
+}
+
+// mods in the session's snapshots with a Nexus ID but no Nexus summary yet (what the details fetch gets)
+function missingDetails() {
+  const keys = new Set();
+  for (const l of S.lists) if (l.source === "mo2") for (const m of S.data[l.name]) if (m.nexus_id && m.summary_source !== "nexus" && !m.unavailable) keys.add(m.key);
+  return keys.size;
 }
 
 let nexusPoll = null;
 async function openNexusLookup() {
   openModal(`<div class="modal-head"><h2 id="modalTitle">Find mods on Nexus</h2><button class="btn icon ghost" data-act="modal-close" aria-label="Close">×</button></div>
     <div class="modal-body">
-      <p class="intro">Uploaded lists only have mod names. This searches Nexus Mods for each name and links the mod when exactly one Nexus mod has that title. Close matches are kept as suggestions for you to confirm in the mod's details. Results are saved, so a name is only searched once. Only mod names are sent to Nexus.</p>
+      <p class="intro">Uploaded lists only have mod names. This searches Nexus Mods for each name and links the mod when exactly one Nexus mod has that title. Close matches are kept as suggestions for you to confirm in the mod's details. Results are saved, so a name is only searched once. Only mod names are sent to Nexus.${S.local?.nexus_key ? " Then, with your API key, it fetches summaries, pictures and authors for the session's MO2 snapshots that don't have them yet." : ""}</p>
       <div class="field"><label>Nexus game</label><div>${esc(gameLabel(gameOf()))} <code>${esc(gameOf())}</code></div>
         <div class="help">The session's game. Its ${S.lists.length} list${S.lists.length === 1 ? "" : "s"} are searched; to search another game, switch to a session for it.</div></div>
       <label class="check"><input type="checkbox" id="nxRetry"> Search again for names that weren't found last time</label>
@@ -1412,7 +1436,7 @@ async function openNexusLookup() {
 async function startNexusLookup() {
   const domain = gameOf();
   try {
-    const r = await fetch("api/nexus/lookup", { method: "POST", headers: API_HEADERS, body: JSON.stringify({ domain, retry: $("#nxRetry").checked }) });
+    const r = await fetch("api/nexus/lookup", { method: "POST", headers: API_HEADERS, body: JSON.stringify({ domain, retry: $("#nxRetry").checked, session: S.session.name }) });
     const j = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
   } catch (e) {
@@ -1431,7 +1455,7 @@ function watchNexusLookup() {
     const c = p.counts || {};
     const pct = p.total ? Math.round((p.done / p.total) * 100) : 0;
     box.innerHTML = `<div class="nxbar"><i style="width:${pct}%"></i></div>
-      <div class="muted">${p.running ? `Searching… ${p.done.toLocaleString()} of ${p.total.toLocaleString()}` : "Finished"} ·
+      <div class="muted">${p.running ? `${p.phase === "details" ? "Fetching details" : "Searching"}… ${p.done.toLocaleString()} of ${p.total.toLocaleString()}` : "Finished"} ·
         <span class="ok">${c.auto || 0} matched</span> · <span class="rv">${c.suggest || 0} to review</span> · ${c.none || 0} not found</div>
       ${p.error ? `<div class="err">${esc(p.error)}</div>` : ""}`;
     $("#nxActions").innerHTML = p.running
@@ -1443,12 +1467,16 @@ function watchNexusLookup() {
     if (!p) return;
     if (!p.running) {
       clearInterval(nexusPoll);
-      S.matches = await getJSON("data/nexus_match.json").catch(() => S.matches);
-      buildCatalog();
-      resolveDecisionKeys();
+      if (p.phase === "details") {
+        await loadAll();  // the snapshots were rewritten with the details
+      } else {
+        S.matches = await getJSON("data/nexus_match.json").catch(() => S.matches);
+        buildCatalog();
+        resolveDecisionKeys();
+      }
       render();
       if ($("#nxSummary")) $("#nxSummary").innerHTML = nexusSummary();
-      if (!$("#nxProgress")) toast(p.error || "Nexus search finished");
+      if (!$("#nxProgress")) toast(p.error || (p.phase === "details" ? "Nexus details added" : "Nexus search finished"));
     }
     paint(p);
   };
@@ -1710,7 +1738,8 @@ document.addEventListener("click", (ev) => {
     case "remove-upload": uploads.splice(+d.i, 1); renderUploads(); break;
     case "import-files": runImportFiles(); break;
     case "modal-close": closeModal(); break;
-    case "delete-list": deleteList(d.list); break;
+    case "remove-list": removeList(d.list); break;
+    case "add-existing": addExistingList(d.list); break;
     case "nx": setNexusMatch(d.nkey, d.nx, d.id); break;
     case "note-menu": if (noteMenu) closeNoteMenu(); else openNoteMenu(el); break;
     case "nm-item": if (el.checked) noteMenu.checked.add(d.v); else noteMenu.checked.delete(d.v); syncNoteAll(); break;

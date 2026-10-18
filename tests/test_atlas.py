@@ -217,8 +217,23 @@ class CoreTests(unittest.TestCase):
         self.assertTrue((lib.PLAN / "decisions.before-sessions.json").exists())
         games = {i["name"]: i["game"] for i in lib.read_json(lib.LISTS / "index.json", [])}
         self.assertEqual(games, {"mine": "skyrimspecialedition", "upload": "skyrimspecialedition"})
+        self.assertEqual(lib.read_session("default")["lists"], ["mine", "upload"])
         lib.migrate_to_sessions()  # only once
         self.assertEqual(len(lib.read_json(lib.SESSIONS / "index.json", [])), 1)
+
+    def test_older_sessions_get_the_lists_they_showed(self):
+        import_files.import_files({"modlist.txt": MO2_MODLIST.encode()}, "mw", game="morrowind")
+        lib.build_text_list("nogame", {"modlist.txt": "+Some Mod\n"}, {"source": "upload"})
+        lib.rebuild_index()
+        for title, game in (("Old Skyrim", "skyrimspecialedition"), ("Old Morrowind", "morrowind")):
+            s = lib.create_session(title, game)
+            del s["lists"]  # as saved before sessions had lists
+            lib.write_session(s)
+        lib.migrate_session_lists()
+        self.assertEqual(lib.read_session("old-skyrim")["lists"], ["nogame"])
+        self.assertEqual(lib.read_session("old-morrowind")["lists"], ["mw", "nogame"])
+        index = {x["name"]: x["lists"] for x in lib.read_json(lib.SESSIONS / "index.json", [])}
+        self.assertEqual(index["old-morrowind"], ["mw", "nogame"])
 
     def test_fresh_install_has_no_session(self):
         lib.migrate_to_sessions()
@@ -258,6 +273,20 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(json.loads((out / "info.json").read_text("utf-8"))["frozen"])
         with self.assertRaises(ValueError):
             export_modlist.export(mo2, "Missing", "snap2", use_api=False)
+
+    def test_reapply_nexus_cache_updates_a_snapshot_without_mo2(self):
+        mo2 = make_fake_mo2(TMP / f"mo2-{self._testMethodName}")
+        export_modlist.export(mo2, "Default", "snap", use_api=False)
+        shutil.rmtree(mo2)  # MO2 isn't read again
+        lib.write_json(lib.NEXUS_CACHE, {"skyrimspecialedition/123": {"summary": "From Nexus.", "author": "someone"}})
+        lib.reapply_nexus_cache("snap")
+        out = lib.LISTS / "snap"
+        fix = {m["name"]: m for m in lib.read_json(out / "mods.json", [])}["Engine Fix"]
+        self.assertEqual((fix["summary"], fix["summary_source"], fix["author"]), ("From Nexus.", "nexus", "someone"))
+        md = (out / "MODLIST.md").read_text("utf-8")
+        self.assertIn("From Nexus.", md)
+        self.assertIn("## Fixes", md)  # sections come from the snapshot's modlist.txt
+        self.assertEqual(lib.read_json(out / "info.json", {})["plugins"], 2)
 
 
 def fake_nexus(catalog):
@@ -497,6 +526,46 @@ class ServerTests(unittest.TestCase):
         status, body = self.request("POST", "/api/snapshot", body={"mo2": str(self.mo2), "profile": "Default", "name": "srv"})
         self.assertEqual(status, 409)
 
+    def wait_for_nexus_job(self):
+        for _ in range(100):
+            status, prog = self.request("GET", "/api/nexus/progress")
+            if not prog["running"]:
+                return prog
+            threading.Event().wait(0.05)
+        self.fail("the Nexus job didn't finish")
+
+    def test_snapshot_fetches_nexus_details_only_when_asked_and_in_the_background(self):
+        fetched = []
+
+        def fake_fetch(mods, api_key, progress=None, should_stop=lambda: False):
+            fetched.append(sorted({m["key"] for m in mods if m["nexus_id"]}))
+            lib.write_json(lib.NEXUS_CACHE, {"skyrimspecialedition/123": {"summary": "From Nexus."}})
+
+        real, lib.fetch_nexus = lib.fetch_nexus, fake_fetch
+        os.environ["NEXUS_API_KEY"] = "test-key"
+        try:
+            snap = {"mo2": str(self.mo2), "profile": "Default", "name": "det", "session": self.session}
+            status, body = self.request("POST", "/api/snapshot", body=snap)
+            self.assertEqual((status, body["details"]), (200, False))
+            self.assertNotIn("Nexus API:", body["output"])  # the exporter itself never calls Nexus
+            self.wait_for_nexus_job()
+            self.assertEqual(fetched, [])
+            status, body = self.request("POST", "/api/snapshot", body={**snap, "details": True})
+            self.assertEqual((status, body["details"]), (200, True))
+            self.assertEqual(self.wait_for_nexus_job()["error"], "")
+            self.assertEqual(fetched, [["skyrimspecialedition/123"]])
+            fix = {m["name"]: m for m in lib.read_json(lib.LISTS / "det" / "mods.json", [])}["Engine Fix"]
+            self.assertEqual(fix["summary"], "From Nexus.")
+            # Find on Nexus fetches details for the session's snapshots too
+            self.assertEqual(self.request("POST", "/api/nexus/lookup", body={"domain": "skyrimspecialedition", "session": self.session})[0], 200)
+            self.wait_for_nexus_job()
+            self.assertEqual(len(fetched), 2)
+            self.assertIn("skyrimspecialedition/123", fetched[1])
+        finally:
+            lib.fetch_nexus = real
+            os.environ["NEXUS_API_KEY"] = ""
+            lib.NEXUS_CACHE.unlink(missing_ok=True)
+
     def test_snapshot_asks_before_replacing_a_list_from_another_profile(self):
         snap = {"mo2": str(self.mo2), "profile": "Default", "name": "other"}
         self.assertEqual(self.request("POST", "/api/snapshot", body=snap)[0], 200)
@@ -508,23 +577,64 @@ class ServerTests(unittest.TestCase):
         self.assertIn("already exists", body["confirm"])
         self.assertEqual(self.request("POST", "/api/snapshot", body={**snap, "profile": "Second", "confirm": True})[0], 200)
 
-    def test_delete_list_asks_first_and_keeps_decisions(self):
-        snap = {"mo2": str(self.mo2), "profile": "Default", "name": "gone"}
+    def test_new_lists_go_into_the_session_and_only_that_one(self):
+        other = lib.create_session("Other plan", "skyrimspecialedition")["name"]
+        snap = {"mo2": str(self.mo2), "profile": "Default", "name": "mine", "session": self.session}
+        self.assertEqual(self.request("POST", "/api/snapshot", body=snap)[0], 200)
+        files = [{"name": "modlist.txt", "data": base64.b64encode(MO2_MODLIST.encode()).decode()}]
+        upload = {"kind": "files", "name": "theirs", "game": "morrowind", "files": files, "session": self.session}
+        self.assertEqual(self.request("POST", "/api/import", body=upload)[0], 200)
+        self.assertEqual(lib.read_json(lib.LISTS / "theirs" / "info.json", {})["game"], "skyrimspecialedition")  # the session's
+        self.assertLessEqual({"mine", "theirs"}, set(lib.read_session(self.session)["lists"]))
+        self.assertEqual(lib.read_session(other)["lists"], [])
+        # replacing a list another session has says so
+        self.assertEqual(self.request("POST", "/api/session/add-list", body={"session": other, "name": "theirs"})[0], 200)
+        status, body = self.request("POST", "/api/import", body={**upload, "session": other})
+        self.assertEqual(status, 409)
+        self.assertIn("also in Test", body["confirm"])
+        for bad in ({"session": other, "name": "nope"}, {"session": "nope", "name": "theirs"}):
+            self.assertEqual(self.request("POST", "/api/session/add-list", body=bad)[0], 404, bad)
+        self.assertEqual(self.request("POST", "/api/snapshot", body={**snap, "session": "nope"})[0], 404)
+        # a new session starts empty; a copy takes the lists
+        status, body = self.request("POST", "/api/session/create", body={"title": "Fresh", "game": "skyrimspecialedition"})
+        self.assertEqual(body["session"]["lists"], [])
+        status, body = self.request("POST", "/api/session/create", body={"title": "Copy", "from": self.session})
+        self.assertEqual(body["session"]["lists"], lib.read_session(self.session)["lists"])
+        for name in (other, "fresh", body["session"]["name"]):
+            self.assertEqual(self.request("POST", "/api/session/delete", body={"name": name, "confirm": True})[0], 200)
+
+    def test_remove_list_keeps_it_for_other_sessions(self):
+        snap = {"mo2": str(self.mo2), "profile": "Default", "name": "both", "session": self.session}
+        self.assertEqual(self.request("POST", "/api/snapshot", body=snap)[0], 200)
+        other = lib.create_session("Second plan", "skyrimspecialedition")["name"]
+        self.request("POST", "/api/session/add-list", body={"session": other, "name": "both"})
+        status, body = self.request("POST", "/api/session/remove-list", body={"session": other, "name": "both"})
+        self.assertEqual((status, body["kept_in"]), (200, ["Test"]))  # no question: nothing is deleted
+        self.assertTrue((lib.LISTS / "both").exists())
+        self.assertNotIn("both", lib.read_session(other)["lists"])
+        self.assertIn("both", lib.read_session(self.session)["lists"])
+        self.assertEqual(self.request("POST", "/api/session/remove-list", body={"session": other, "name": "both"})[0], 404)
+        self.assertEqual(self.request("POST", "/api/session/delete", body={"name": other, "confirm": True})[0], 200)
+
+    def test_remove_last_use_of_a_list_asks_and_keeps_decisions(self):
+        snap = {"mo2": str(self.mo2), "profile": "Default", "name": "gone", "session": self.session}
         self.assertEqual(self.request("POST", "/api/snapshot", body=snap)[0], 200)
         self.assertEqual(self.request("POST", self.api_decisions, body={"skyrimspecialedition/123": {"decision": "keep"}})[0], 200)
-        status, body = self.request("POST", "/api/delete", body={"name": "gone"})
+        remove = {"session": self.session, "name": "gone"}
+        status, body = self.request("POST", "/api/session/remove-list", body=remove)
         self.assertEqual(status, 409)
-        self.assertIn("confirm", body)
+        self.assertIn("files are deleted", body["confirm"])
         self.assertTrue((lib.LISTS / "gone").exists())
-        status, body = self.request("POST", "/api/delete", body={"name": "gone", "confirm": True})
+        status, body = self.request("POST", "/api/session/remove-list", body={**remove, "confirm": True})
         self.assertEqual(status, 200, body)
+        self.assertNotIn("gone", lib.read_session(self.session)["lists"])
         self.assertFalse((lib.LISTS / "gone").exists())
         names = [i["name"] for i in json.loads((lib.LISTS / "index.json").read_text("utf-8"))]
         self.assertNotIn("gone", names)
         self.assertNotIn("gone", lib.read_json(lib.LOCAL_SOURCES, {}))
         self.assertIn("skyrimspecialedition/123", lib.read_json(self.decisions, {}))
         for bad in ("gone", "../plan", "index.json", ""):
-            self.assertEqual(self.request("POST", "/api/delete", body={"name": bad, "confirm": True})[0], 404, bad)
+            self.assertEqual(self.request("POST", "/api/session/remove-list", body={**remove, "name": bad, "confirm": True})[0], 404, bad)
         self.assertTrue(self.decisions.exists())
 
     def test_import_records_the_game(self):

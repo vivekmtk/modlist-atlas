@@ -14,7 +14,8 @@ Extra steps for when you need them. For everything else, see the [README](../REA
 
 ## Command line
 
-The same snapshots and imports are available without the web app:
+The same snapshots and imports are available without the web app. A list made here isn't in any
+session yet: add it in the app with **+ Add list → From other sessions**.
 
 ```powershell
 python tools/export_modlist.py                                   # snapshot using .env

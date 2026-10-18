@@ -277,8 +277,9 @@ def parse_modlist(lines, display_order=False):
 
 # ---------------------------------------------------------------- Nexus API
 
-def fetch_nexus(mods, api_key: str):
-    """Fill data/nexus_cache.json for mods not fetched yet. Returns the cache."""
+def fetch_nexus(mods, api_key: str, progress=None, should_stop=lambda: False):
+    """Fill data/nexus_cache.json for mods not fetched yet. Returns the cache.
+    progress(done, total) is called before the first mod and after each one."""
     cache = read_json(NEXUS_CACHE, {})
     todo, seen = [], set()
     for m in mods:
@@ -286,7 +287,11 @@ def fetch_nexus(mods, api_key: str):
             seen.add(m["key"])
             todo.append(m)
     print(f"Nexus API: {len(todo)} mods to fetch ({len(cache)} cached)")
+    if progress:
+        progress(0, len(todo))
     for i, m in enumerate(todo, 1):
+        if should_stop():
+            break
         url = f"https://api.nexusmods.com/v1/games/{m['domain']}/mods/{m['nexus_id']}.json"
         req = urllib.request.Request(url, headers={
             "apikey": api_key, "accept": "application/json",
@@ -321,6 +326,8 @@ def fetch_nexus(mods, api_key: str):
         if i % 25 == 0:
             print(f"  {i}/{len(todo)}  (hourly remaining: {remaining})", flush=True)
             write_json(NEXUS_CACHE, cache)
+        if progress:
+            progress(i, len(todo))
         time.sleep(0.25)
     write_json(NEXUS_CACHE, cache)
     return cache
@@ -340,6 +347,29 @@ def apply_nexus_cache(mods):
                 m[f] = c[f]
         if c.get("available") is False:
             m["unavailable"] = True
+
+
+def reapply_nexus_cache(name: str):
+    """Rewrite an MO2 snapshot with what the Nexus cache has now (after a background fetch),
+    without reading MO2 again. The sections come from the snapshot's own copy of modlist.txt."""
+    out = LISTS / name
+    info, mods = read_json(out / "info.json", None), read_json(out / "mods.json", None)
+    modlist = out / "profile" / "modlist.txt"
+    if not info or not mods or info.get("source") != "mo2" or not modlist.is_file():
+        return
+    entries = list(parse_modlist(modlist.read_text("utf-8").splitlines()))
+    if sum(flag != "sep" for flag, _, _ in entries) != len(mods):
+        return  # not the modlist.txt this snapshot was made from
+    apply_nexus_cache(mods)
+    sections, rest = [{"name": UNSORTED, "mods": []}], iter(mods)
+    for flag, mod_name, _ in entries:
+        if flag == "sep":
+            sections.append({"name": mod_name, "mods": []})
+        else:
+            sections[-1]["mods"].append(next(rest))
+    plugins_txt = out / "profile" / "plugins.txt"
+    plugins = parse_plugins(plugins_txt.read_text("utf-8", errors="replace").splitlines()) if plugins_txt.is_file() else []
+    write_list(out, info, mods, sections, plugins)
 
 
 # ---------------------------------------------------------------- outputs
@@ -490,28 +520,47 @@ def read_session(name: str):
     return read_json(SESSIONS / name / "session.json", None) if valid_name(name) else None
 
 
+def write_session(session: dict):
+    write_json(SESSIONS / session["name"] / "session.json", session)
+
+
+def all_sessions() -> list:
+    return [s for s in (read_json(p, None) for p in sorted(SESSIONS.glob("*/session.json"))) if s]
+
+
+def sessions_using(name: str) -> list:
+    """The sessions that have the list `name`."""
+    return [s for s in all_sessions() if name in s.get("lists", [])]
+
+
+def add_session_list(session: dict, name: str):
+    if name not in session.setdefault("lists", []):
+        session["lists"].append(name)
+        write_session(session)
+        rebuild_sessions_index()
+
+
 def rebuild_sessions_index():
-    """plan/sessions/index.json: every session's name, title and game, read by the web app."""
+    """plan/sessions/index.json: every session's name, title, game and lists, read by the web app."""
     items = []
-    for path in sorted(SESSIONS.glob("*/session.json")):
-        s = read_json(path, None)
-        if s:
-            items.append({k: s.get(k, "") for k in ("name", "title", "game", "created")})
+    for s in all_sessions():
+        items.append({**{k: s.get(k, "") for k in ("name", "title", "game", "created")}, "lists": s.get("lists", [])})
     items.sort(key=lambda s: (s["title"].lower(), s["name"]))
     write_json(SESSIONS / "index.json", items)
 
 
-def create_session(title: str, game: str, setup=None, decisions=None) -> dict:
-    """A new session folder named after the title (made unique), with its own decisions."""
+def create_session(title: str, game: str, setup=None, decisions=None, lists=None) -> dict:
+    """A new session folder named after the title (made unique), with its own decisions and lists."""
     base = re.sub(r"-{2,}", "-", slug(title))[:36]
     if not valid_name(base):
         base = "session"
     name, i = base, 2
     while (SESSIONS / name).exists():
         name, i = f"{base}-{i}", i + 1
-    session = {"name": name, "title": title, "game": game, "created": now_iso(), "setup": setup or {}}
+    session = {"name": name, "title": title, "game": game, "created": now_iso(), "setup": setup or {},
+               "lists": list(lists or [])}
     write_json(session_decisions(name), decisions or {})
-    write_json(SESSIONS / name / "session.json", session)
+    write_session(session)
     rebuild_sessions_index()
     return session
 
@@ -534,9 +583,24 @@ def migrate_to_sessions():
             info["game"] = games[n] or game  # uploads have no Nexus IDs: they go with the other lists
             write_json(LISTS / n / "info.json", info)
     rebuild_index()
-    create_session("Default", game, decisions=read_json(LEGACY_DECISIONS, {}, strict=True))
+    create_session("Default", game, decisions=read_json(LEGACY_DECISIONS, {}, strict=True),
+                   lists=[n for n, i in infos.items() if i["game"] == game])
     if LEGACY_DECISIONS.exists():
         os.replace(LEGACY_DECISIONS, LEGACY_DECISIONS.with_name("decisions.before-sessions.json"))
+
+
+def migrate_session_lists():
+    """Sessions from before lists belonged to sessions get the lists they showed then: every list
+    for their game, and lists with no game."""
+    infos = read_json(LISTS / "index.json", [])
+    changed = False
+    for s in all_sessions():
+        if "lists" not in s:
+            s["lists"] = [i["name"] for i in infos if not i.get("game") or i["game"] == s["game"]]
+            write_session(s)
+            changed = True
+    if changed:
+        rebuild_sessions_index()
 
 
 def build_text_list(name: str, files: dict, info: dict) -> dict:
