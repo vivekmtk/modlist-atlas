@@ -29,7 +29,7 @@ MATCHES = lib.DATA / "nexus_match.json"
 API = "https://api.nexusmods.com/v2/graphql"
 HEADERS = {"Content-Type": "application/json", "User-Agent": "modlist-atlas/2.0",
            "Application-Name": "modlist-atlas", "Application-Version": "2.0"}
-DOMAIN_RE = re.compile(r"^[a-z0-9]{1,40}$")
+DOMAIN_RE = lib.GAME_RE
 BATCH = 12          # names per request; each name is two searches
 PAUSE = 1.0         # seconds between requests, to stay polite without a key
 MAX_CANDIDATES = 3
@@ -113,11 +113,13 @@ def classify(name: str, exact: list, similar: list) -> dict:
     return entry
 
 
-def names_to_lookup() -> dict:
-    """{normalized name: name} for every name-only mod in every list, except names another list
-    already knows a Nexus ID for (the app borrows those)."""
+def names_to_lookup(domain: str) -> dict:
+    """{normalized name: name} for every name-only mod in the game's lists (and lists with no game),
+    except names another list already knows a Nexus ID for (the app borrows those)."""
     known, wanted = set(), {}
     for info in lib.read_json(lib.LISTS / "index.json", []):
+        if info.get("game") not in (domain, "", None):
+            continue
         for m in lib.read_json(lib.LISTS / info["name"] / "mods.json", []):
             k = lib.name_key(m["name"])
             if m["key"].startswith("name:"):
@@ -129,7 +131,7 @@ def names_to_lookup() -> dict:
 
 def pending(domain: str, retry: bool = False) -> dict:
     cached = load()["games"].get(domain, {})
-    return {k: n for k, n in names_to_lookup().items()
+    return {k: n for k, n in names_to_lookup(domain).items()
             if k not in cached or (retry and cached[k].get("status") == "none")}
 
 

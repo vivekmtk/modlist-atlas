@@ -145,6 +145,7 @@ kbd {
   border-bottom-width: 2px; border-radius: var(--r-xs); padding: 0 5px;
 }
 
+[hidden] { display: none !important; } /* .btn and friends set display, which would beat the attribute */
 .top-actions { display: flex; gap: 8px; align-items: center; }
 .btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 7px; white-space: nowrap;
@@ -557,6 +558,23 @@ tr:hover .quick button, .quick:focus-within button, .quick button.on { opacity: 
 .dropzone.over { border-color: var(--gold); background: var(--gold-soft); }
 .dz-rune { font-size: 26px; color: var(--gold); opacity: .7; }
 .dz-actions { display: flex; gap: 8px; justify-content: center; margin-top: 10px; flex-wrap: wrap; }
+/* sessions: the header button, the Sessions dialog and the first-run form */
+.session-btn { max-width: 320px; gap: 8px; flex: none; }
+.listbar-sep { width: 1px; align-self: stretch; margin: 2px 6px; background: var(--line-2); flex: none; }
+.session-btn .ses-title { overflow: hidden; text-overflow: ellipsis; color: var(--gold-2); }
+.session-btn .ses-game { color: var(--muted); font-size: var(--fs-sm); }
+.session-btn .ses-caret { color: var(--muted); font-size: var(--fs-xs); }
+.ses-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 18px; }
+.ses-row { display: flex; align-items: center; gap: 4px; padding: 4px; border-radius: var(--r-md); border: 1px solid var(--line); background: var(--panel); }
+.ses-row.current { border-color: color-mix(in srgb, var(--gold) 55%, transparent); background: var(--gold-soft); }
+.ses-pick { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; text-align: left; padding: 5px 8px; border: 0; background: none; color: var(--text); border-radius: var(--r-sm); }
+.ses-pick b { font-weight: 600; }
+.ses-pick .muted { font-size: var(--fs-sm); }
+.ses-pick:hover b { color: var(--gold-2); }
+.ses-new { margin: 0 0 10px; font: 600 var(--fs-xs) var(--font-display); letter-spacing: .18em; text-transform: uppercase; color: var(--gold); }
+.game-other { margin-top: 6px; }
+.first-session { max-width: 560px; margin: 24px auto; }
+.first-session .empty { padding: 36px 20px; margin-bottom: 18px; }
 .file-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; align-items: center; min-height: 22px; font-size: var(--fs-md); }
 .file-chips .err { color: var(--drop); font-size: var(--fs-sm); }
 .note-label { display: block; font-size: var(--fs-2xs); letter-spacing: .14em; text-transform: uppercase; color: var(--muted); margin-bottom: 5px; }
@@ -639,6 +657,9 @@ footer { text-align: center; color: var(--muted); font-size: var(--fs-sm); paddi
   .topbar { position: static; }
   .top-actions { flex-wrap: wrap; }
   #nexusBtn .btn-label { display: none; }
+  .session-btn .ses-game { display: none; }
+  .ses-row { flex-wrap: wrap; }
+  .ses-pick { flex-basis: 100%; }
   .tabs { order: 3; width: 100%; min-width: 0; }
   .tab { flex: 1; padding: 6px 8px; }
   .cards { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 10px; }

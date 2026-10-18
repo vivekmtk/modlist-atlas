@@ -140,6 +140,7 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(lib.instance_game(mo2), "Fallout4")
         export_modlist.export(mo2, "Default", "fo4", use_api=False)
         out = lib.LISTS / "fo4"
+        self.assertEqual(json.loads((out / "info.json").read_text("utf-8"))["game"], "fallout4")
         mods = {m["name"]: m for m in json.loads((out / "mods.json").read_text("utf-8"))}
         self.assertEqual(mods["Weapon Mod"]["url"], "https://www.nexusmods.com/fallout4/mods/55")
         self.assertEqual(mods["No Game Mod"]["url"], "https://www.nexusmods.com/fallout4/mods/77")  # instance game
@@ -196,6 +197,40 @@ class CoreTests(unittest.TestCase):
             import_files.import_files({"notes.txt": b"hi"}, "nomodlist")
         with self.assertRaises(ValueError):
             import_files.import_files({"modlist.txt": MO2_MODLIST.encode()}, "con")
+        info = import_files.import_files({"modlist.txt": MO2_MODLIST.encode()}, "mw", game="morrowind")
+        self.assertEqual(info["game"], "morrowind")
+        with self.assertRaises(ValueError):
+            import_files.import_files({"modlist.txt": MO2_MODLIST.encode()}, "bad", game="../x")
+
+    def test_migration_moves_decisions_into_a_first_session(self):
+        export_modlist.export(make_fake_mo2(TMP / f"mo2-{self._testMethodName}"), "Default", "mine", use_api=False)
+        lib.build_text_list("upload", {"modlist.txt": "+Some Mod\n"}, {"source": "upload"})  # an older upload: no game
+        info = lib.read_json(lib.LISTS / "mine" / "info.json", {})
+        del info["game"]  # as snapshotted before lists had a game
+        lib.write_json(lib.LISTS / "mine" / "info.json", info)
+        lib.write_json(lib.LEGACY_DECISIONS, {"skyrimspecialedition/123": {"decision": "keep"}})
+        lib.migrate_to_sessions()
+        sessions = lib.read_json(lib.SESSIONS / "index.json", [])
+        self.assertEqual([(s["name"], s["title"], s["game"]) for s in sessions], [("default", "Default", "skyrimspecialedition")])
+        self.assertEqual(lib.read_json(lib.session_decisions("default"), {}), {"skyrimspecialedition/123": {"decision": "keep"}})
+        self.assertFalse(lib.LEGACY_DECISIONS.exists())
+        self.assertTrue((lib.PLAN / "decisions.before-sessions.json").exists())
+        games = {i["name"]: i["game"] for i in lib.read_json(lib.LISTS / "index.json", [])}
+        self.assertEqual(games, {"mine": "skyrimspecialedition", "upload": "skyrimspecialedition"})
+        lib.migrate_to_sessions()  # only once
+        self.assertEqual(len(lib.read_json(lib.SESSIONS / "index.json", [])), 1)
+
+    def test_fresh_install_has_no_session(self):
+        lib.migrate_to_sessions()
+        self.assertFalse(lib.SESSIONS.exists())
+
+    def test_session_names_are_unique_and_safe(self):
+        self.assertEqual(lib.create_session("Skyrim: Nordic plan!", "skyrimspecialedition")["name"], "skyrim-nordic-plan")
+        self.assertEqual(lib.create_session("Skyrim: Nordic plan?", "skyrimspecialedition")["name"], "skyrim-nordic-plan-2")
+        self.assertEqual(lib.create_session("Skyrim - Lorerim", "skyrimspecialedition")["name"], "skyrim-lorerim")
+        self.assertEqual(lib.create_session("CON", "morrowind")["name"], "session")
+        self.assertEqual(lib.create_session("...", "morrowind")["name"], "session-2")
+        self.assertEqual(len(lib.read_json(lib.SESSIONS / "index.json", [])), 5)
 
     def test_export_from_fake_mo2(self):
         mo2 = make_fake_mo2(TMP / f"mo2-{self._testMethodName}")
@@ -204,6 +239,8 @@ class CoreTests(unittest.TestCase):
         mods = {m["name"]: m for m in json.loads((out / "mods.json").read_text("utf-8"))}
         fix = mods["Engine Fix"]
         self.assertEqual(fix["key"], "skyrimspecialedition/123")
+        # no ModOrganizer.ini: the game comes from the mods
+        self.assertEqual(json.loads((out / "info.json").read_text("utf-8"))["game"], "skyrimspecialedition")
         self.assertEqual(fix["url"], "https://www.nexusmods.com/skyrimspecialedition/mods/123")
         self.assertEqual(fix["category"], "Bug Fixes")
         self.assertFalse(fix["enabled"])
@@ -273,7 +310,7 @@ class NexusMatchTests(unittest.TestCase):
 
     def test_tiers_and_cache(self):
         post, calls = fake_nexus(NEXUS_CATALOG)
-        self.assertNotIn("name:plainmod", nexus_match.names_to_lookup())
+        self.assertNotIn("name:plainmod", nexus_match.names_to_lookup("skyrimspecialedition"))
         counts = nexus_match.run("skyrimspecialedition", post=post, pause=0)
         game = nexus_match.load()["games"]["skyrimspecialedition"]
         self.assertEqual((game["name:skyui"]["status"], game["name:skyui"]["id"]), ("auto", 12604))
@@ -318,6 +355,9 @@ class ServerTests(unittest.TestCase):
         cls.port = cls.server.server_address[1]
         threading.Thread(target=cls.server.serve_forever, daemon=True).start()
         cls.mo2 = make_fake_mo2(TMP / "mo2-server")
+        cls.session = lib.create_session("Test", "skyrimspecialedition")["name"]
+        cls.decisions = lib.session_decisions(cls.session)
+        cls.api_decisions = f"/api/decisions?session={cls.session}"
 
     @classmethod
     def tearDownClass(cls):
@@ -351,17 +391,23 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(self.request("GET", "/")[0], 200)
         self.assertEqual(self.request("GET", "/web/app.js")[0], 200)
         self.assertEqual(self.request("GET", "/lists/index.json")[0], 200)
+        self.assertEqual(self.request("GET", "/plan/sessions/index.json")[0], 200)
+        self.assertEqual(self.request("GET", f"/plan/sessions/{self.session}/decisions.json")[0], 200)
+        # never "304 not modified": a file rewritten within the same second would look unchanged
+        later = {"If-Modified-Since": "Fri, 01 Jan 2100 00:00:00 GMT"}
+        self.assertEqual(self.request("GET", "/plan/sessions/index.json", headers=later)[0], 200)
         for path in ("/.env", "/%2eenv", "/web/../.env", "/web/%2e%2e/.env", "/tools/serve.py", "/README.md",
                      "/lists/", "/lists/../.lists.local.json", "/ENV~1", "/lists/x/ENV~1", "/web/..%5c.env",
-                     "/.git/config", "/plan/", "/data/nexus_cache.json"):
+                     "/.git/config", "/plan/", "/data/nexus_cache.json", "/plan/decisions.json", "/plan/sessions/",
+                     "/plan/sessions/../decisions.before-sessions.json"):
             self.assertEqual(self.request("GET", path)[0], 404, path)
 
     def test_host_header_and_post_guards(self):
         self.assertEqual(self.request("GET", "/api/status", headers={"Host": "evil.example"})[0], 403)
-        status, _ = self.request("POST", "/api/decisions", body={"k": {"decision": "keep"}},
+        status, _ = self.request("POST", self.api_decisions, body={"k": {"decision": "keep"}},
                                  headers={"X-Modlist-Atlas": "0"})
         self.assertEqual(status, 400)
-        status, _ = self.request("POST", "/api/decisions", body={"k": {"decision": "keep"}},
+        status, _ = self.request("POST", self.api_decisions, body={"k": {"decision": "keep"}},
                                  headers={"Content-Type": "text/plain"})
         self.assertEqual(status, 400)
 
@@ -377,53 +423,53 @@ class ServerTests(unittest.TestCase):
             lib.LOCAL_SOURCES.unlink()
 
     def test_decisions_merge_fields(self):
-        self.request("POST", "/api/decisions", body={"a/1": {"decision": "keep", "name": "A", "name_key": "name:a"}})
-        self.request("POST", "/api/decisions", body={"a/1": {"note": "needs patch"}})
-        store = json.loads(lib.DECISIONS.read_text("utf-8"))
+        self.request("POST", self.api_decisions, body={"a/1": {"decision": "keep", "name": "A", "name_key": "name:a"}})
+        self.request("POST", self.api_decisions, body={"a/1": {"note": "needs patch"}})
+        store = json.loads(self.decisions.read_text("utf-8"))
         self.assertEqual(store["a/1"]["decision"], "keep")
         self.assertEqual(store["a/1"]["note"], "needs patch")
         self.assertEqual(store["a/1"]["name_key"], "name:a")
-        self.request("POST", "/api/decisions", body={"a/1": {"decision": "", "note": ""}})
-        self.assertNotIn("a/1", json.loads(lib.DECISIONS.read_text("utf-8")))
-        status, _ = self.request("POST", "/api/decisions", body={"a/1": {"decision": "delete-everything"}})
-        self.assertNotIn("a/1", json.loads(lib.DECISIONS.read_text("utf-8")))
+        self.request("POST", self.api_decisions, body={"a/1": {"decision": "", "note": ""}})
+        self.assertNotIn("a/1", json.loads(self.decisions.read_text("utf-8")))
+        status, _ = self.request("POST", self.api_decisions, body={"a/1": {"decision": "delete-everything"}})
+        self.assertNotIn("a/1", json.loads(self.decisions.read_text("utf-8")))
 
     def test_decisions_bulk_save_replaces_comments(self):
-        self.request("POST", "/api/decisions", body={"b/1": {"decision": "keep", "note": "old"}, "b/2": {"note": "keep me?"}})
-        status, body = self.request("POST", "/api/decisions",
+        self.request("POST", self.api_decisions, body={"b/1": {"decision": "keep", "note": "old"}, "b/2": {"note": "keep me?"}})
+        status, body = self.request("POST", self.api_decisions,
                                     body={"b/1": {"decision": "drop", "note": "outdated"}, "b/2": {"decision": "drop", "note": "outdated"},
                                           "b/3": {"decision": "drop", "note": "outdated"}})
         self.assertEqual(status, 200)
-        store = json.loads(lib.DECISIONS.read_text("utf-8"))
+        store = json.loads(self.decisions.read_text("utf-8"))
         for k in ("b/1", "b/2", "b/3"):
             self.assertEqual((store[k]["decision"], store[k]["note"]), ("drop", "outdated"))
         self.assertEqual(set(body["saved"]), {"b/1", "b/2", "b/3"})
         # a decision-only bulk save leaves the comments alone
-        self.request("POST", "/api/decisions", body={"b/1": {"decision": "maybe"}, "b/2": {"decision": "maybe"}})
-        store = json.loads(lib.DECISIONS.read_text("utf-8"))
+        self.request("POST", self.api_decisions, body={"b/1": {"decision": "maybe"}, "b/2": {"decision": "maybe"}})
+        store = json.loads(self.decisions.read_text("utf-8"))
         self.assertEqual((store["b/1"]["decision"], store["b/1"]["note"]), ("maybe", "outdated"))
 
     def test_decisions_concurrent_writes_are_not_lost(self):
         keys = [f"c/{i}" for i in range(100)]
-        threads = [threading.Thread(target=self.request, args=("POST", "/api/decisions", {k: {"decision": "drop"}}))
+        threads = [threading.Thread(target=self.request, args=("POST", self.api_decisions, {k: {"decision": "drop"}}))
                    for k in keys]
         for t in threads:
             t.start()
         for t in threads:
             t.join()
-        store = json.loads(lib.DECISIONS.read_text("utf-8"))
+        store = json.loads(self.decisions.read_text("utf-8"))
         self.assertTrue(all(store.get(k, {}).get("decision") == "drop" for k in keys))
 
     def test_corrupt_decisions_file_is_never_overwritten(self):
-        lib.DECISIONS.parent.mkdir(parents=True, exist_ok=True)
-        lib.DECISIONS.write_text('{"keep/me": {"decision": "keep"', "utf-8")
+        self.decisions.parent.mkdir(parents=True, exist_ok=True)
+        self.decisions.write_text('{"keep/me": {"decision": "keep"', "utf-8")
         try:
-            status, body = self.request("POST", "/api/decisions", body={"x/1": {"decision": "drop"}})
+            status, body = self.request("POST", self.api_decisions, body={"x/1": {"decision": "drop"}})
             self.assertEqual(status, 500)
             self.assertIn("Not saved", body["error"])
-            self.assertEqual(lib.DECISIONS.read_text("utf-8"), '{"keep/me": {"decision": "keep"')
+            self.assertEqual(self.decisions.read_text("utf-8"), '{"keep/me": {"decision": "keep"')
         finally:
-            lib.DECISIONS.write_text("{}", "utf-8")
+            self.decisions.write_text("{}", "utf-8")
 
     def test_import_upload_with_overwrite_confirm(self):
         files = [{"name": "modlist.txt", "data": base64.b64encode(MO2_MODLIST.encode()).decode()}]
@@ -465,7 +511,7 @@ class ServerTests(unittest.TestCase):
     def test_delete_list_asks_first_and_keeps_decisions(self):
         snap = {"mo2": str(self.mo2), "profile": "Default", "name": "gone"}
         self.assertEqual(self.request("POST", "/api/snapshot", body=snap)[0], 200)
-        self.assertEqual(self.request("POST", "/api/decisions", body={"skyrimspecialedition/123": {"decision": "keep"}})[0], 200)
+        self.assertEqual(self.request("POST", self.api_decisions, body={"skyrimspecialedition/123": {"decision": "keep"}})[0], 200)
         status, body = self.request("POST", "/api/delete", body={"name": "gone"})
         self.assertEqual(status, 409)
         self.assertIn("confirm", body)
@@ -476,10 +522,68 @@ class ServerTests(unittest.TestCase):
         names = [i["name"] for i in json.loads((lib.LISTS / "index.json").read_text("utf-8"))]
         self.assertNotIn("gone", names)
         self.assertNotIn("gone", lib.read_json(lib.LOCAL_SOURCES, {}))
-        self.assertIn("skyrimspecialedition/123", lib.read_json(lib.DECISIONS, {}))
+        self.assertIn("skyrimspecialedition/123", lib.read_json(self.decisions, {}))
         for bad in ("gone", "../plan", "index.json", ""):
             self.assertEqual(self.request("POST", "/api/delete", body={"name": bad, "confirm": True})[0], 404, bad)
-        self.assertTrue(lib.DECISIONS.exists())
+        self.assertTrue(self.decisions.exists())
+
+    def test_import_records_the_game(self):
+        files = [{"name": "modlist.txt", "data": base64.b64encode(MO2_MODLIST.encode()).decode()}]
+        body = {"kind": "files", "name": "mwup", "game": "morrowind", "files": files}
+        self.assertEqual(self.request("POST", "/api/import", body=body)[0], 200)
+        self.assertEqual(lib.read_json(lib.LISTS / "mwup" / "info.json", {})["game"], "morrowind")
+        self.assertEqual(self.request("POST", "/api/import", body={**body, "name": "bad", "game": "Morrow Wind"})[0], 400)
+
+    def test_status_lists_games(self):
+        _, st = self.request("GET", "/api/status")
+        self.assertEqual(st["games"]["skyrimspecialedition"], "Skyrim Special Edition")
+        self.assertEqual(st["games"]["newvegas"], "New Vegas")
+
+    def test_sessions_keep_their_own_decisions(self):
+        status, body = self.request("POST", "/api/session/create", body={"title": "Morrowind", "game": "morrowind"})
+        self.assertEqual(status, 200, body)
+        mw = body["session"]["name"]
+        self.request("POST", self.api_decisions, body={"x/1": {"decision": "keep"}})
+        self.request("POST", f"/api/decisions?session={mw}", body={"x/1": {"decision": "drop"}})
+        self.assertEqual(lib.read_json(self.decisions, {})["x/1"]["decision"], "keep")
+        self.assertEqual(lib.read_json(lib.session_decisions(mw), {})["x/1"]["decision"], "drop")
+        for bad in ("", "nope", "../lists"):
+            self.assertEqual(self.request("POST", f"/api/decisions?session={bad}", body={"x/1": {"decision": "keep"}})[0], 404, bad)
+        self.assertEqual(self.request("POST", "/api/session/create", body={"title": "X", "game": "../x"})[0], 400)
+        self.assertEqual(self.request("POST", "/api/session/create", body={"title": " ", "game": "morrowind"})[0], 400)
+        self.assertEqual(self.request("POST", "/api/session/delete", body={"name": mw, "confirm": True})[0], 200)
+
+    def test_duplicate_rename_setup_and_delete_session(self):
+        self.request("POST", self.api_decisions, body={"dup/1": {"decision": "maybe", "note": "try"}})
+        setup = {"primary": "srv", "tri": {"srv": "in"}}
+        self.assertEqual(self.request("POST", "/api/session/setup", body={"name": self.session, "setup": setup})[0], 200)
+        self.assertEqual(self.request("POST", "/api/session/setup", body={"name": self.session, "setup": "x"})[0], 400)
+        self.assertEqual(self.request("POST", "/api/session/setup", body={"name": self.session, "setup": {"x": "y" * 60_000}})[0], 400)
+        # a copy takes the decisions, the setup and the game (whatever game is sent)
+        status, body = self.request("POST", "/api/session/create", body={"title": "Variant", "game": "fallout4", "from": self.session})
+        self.assertEqual(status, 200, body)
+        copy = body["session"]
+        self.assertEqual((copy["game"], copy["setup"]), ("skyrimspecialedition", setup))
+        self.assertEqual(lib.read_json(lib.session_decisions(copy["name"]), {})["dup/1"]["note"], "try")
+        self.assertEqual(self.request("POST", "/api/session/create", body={"title": "Y", "from": "nope"})[0], 404)
+        self.assertEqual(self.request("POST", "/api/session/rename", body={"name": copy["name"], "title": "Variant B"})[0], 200)
+        titles = {s["name"]: s["title"] for s in lib.read_json(lib.SESSIONS / "index.json", [])}
+        self.assertEqual(titles[copy["name"]], "Variant B")
+        # delete asks first, then removes only that session
+        status, body = self.request("POST", "/api/session/delete", body={"name": copy["name"]})
+        self.assertEqual(status, 409)
+        n = len(lib.read_json(lib.session_decisions(copy["name"]), {}))
+        self.assertIn(f"its {n} decisions?", body["confirm"])
+        self.assertEqual(self.request("POST", "/api/session/delete", body={"name": copy["name"], "confirm": True})[0], 200)
+        self.assertFalse((lib.SESSIONS / copy["name"]).exists())
+        self.assertNotIn(copy["name"], {s["name"] for s in lib.read_json(lib.SESSIONS / "index.json", [])})
+        self.assertIn("dup/1", lib.read_json(self.decisions, {}))
+        # never the last one
+        status, body = self.request("POST", "/api/session/delete", body={"name": self.session, "confirm": True})
+        self.assertEqual(status, 400)
+        self.assertTrue(self.decisions.exists())
+        for bad in ("nope", "../lists", ""):
+            self.assertEqual(self.request("POST", "/api/session/delete", body={"name": bad, "confirm": True})[0], 404, bad)
 
     def test_nexus_endpoints(self):
         lib.build_text_list("nx", {"modlist.txt": "+SkyUI\n+Twin Mod\n"}, {})

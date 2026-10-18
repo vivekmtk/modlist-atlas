@@ -113,6 +113,7 @@ def export(mo2: Path, profile: str, name: str, use_api: bool = True, freeze=None
         "source": "mo2",
         "source_label": f"MO2 profile `{profile}`",
         "profile": profile,
+        "game": lib.nexus_domain(default_game) or lib.main_game(mods),
         "generated": lib.now_iso(),
     }
     lib.write_list(out, info, mods, sections, plugins)

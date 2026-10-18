@@ -15,10 +15,11 @@ Nexus API (optional key) / Nexus search (on request) ───┤
                                                          ▼
        lists/<name>/{mods.json, mods.csv, MODLIST*.md, LOADORDER.md, info.json, profile/, notes/}
        lists/index.json             data/descriptions.json, data/nexus_cache.json, data/nexus_match.json
+       plan/sessions/index.json     plan/sessions/<session>/{session.json, decisions.json}
                                                          │
 index.html + web/app.{js,css}  ◄── fetch ────────────────┘
-        ▲            │ POST snapshot / import / decisions / freeze
-        └── tools/serve.py (127.0.0.1 only) ──► plan/decisions.json, runs export_modlist.py
+        ▲            │ POST snapshot / import / decisions / sessions / freeze
+        └── tools/serve.py (127.0.0.1 only) ──► plan/sessions/, runs export_modlist.py
 ```
 
 - **export_modlist.py** reads `modlist.txt`, `plugins.txt` and each mod's `meta.ini` (Nexus ID,
@@ -61,8 +62,23 @@ index.html + web/app.{js,css}  ◄── fetch ───────────
   a Nexus key when any other list has a mod with the same normalized name, and borrows its link,
   category and description. Several MO2 mods can share one Nexus key (main file + optional files);
   they're shown as one record with "+N files" in Compare.
-- **Decisions are keyed by mod identity** (`plan/decisions.json`, each with an optional comment),
-  so they survive re-exports and apply across every list containing the mod. Each also stores the
+- **Sessions separate plans; lists are shared.** A session is a name, a game, the app's setup
+  (lists, filters) and its own decisions, in `plan/sessions/<name>/`. Lists aren't owned by a
+  session: each list records its game (`info.json: game`, from MO2, or chosen on upload) and shows
+  in every session for that game, so a list is snapshotted once and used in several plans. A list
+  with no game (older CLI imports) shows in every session. The session's game also scopes Find on
+  Nexus, so one game's name matches never apply to another's lists. The folder name is derived
+  from the title, so users only ever see titles. Duplicate copies decisions and setup; deleting
+  keeps at least one session. Which session is open is remembered per browser; the setup is saved
+  on disk with the session.
+- **Upgrading moves, never drops, decisions.** On start, if no session exists but lists or the old
+  `plan/decisions.json` do, every list gets its game (the most common one among its mods; uploads,
+  which have none, get the most common game across lists) and the decisions move into a *Default*
+  session for that game. The old file is renamed to `decisions.before-sessions.json` only after the
+  session is written, so a crash mid-way repeats the upgrade. A fresh install gets no session; the
+  app asks for a name and game first.
+- **Decisions are keyed by mod identity** (`plan/sessions/<name>/decisions.json`, each with an
+  optional comment), so they survive re-exports and apply across every list containing the mod. Each also stores the
   mod's normalized name, so it still matches if the mod's key changes (e.g. the list that supplied
   the Nexus ID is deleted).
 - **Decisions are never lost to concurrency or crashes.** The server merges only the fields a request
@@ -75,6 +91,9 @@ index.html + web/app.{js,css}  ◄── fetch ───────────
 - **No machine-specific values in code.** Paths come from `.env` or flags; the decisions panel
   defaults to the first frozen list rather than a hard-coded name.
 - **Frozen lists** (`info.json: frozen`) are protected: the app asks before overwriting them.
+- **No "304 Not Modified".** Last-Modified has one-second resolution, so a file rewritten twice in
+  a second (the sessions index after rename then delete) would be served stale; the server ignores
+  `If-Modified-Since` and always sends the file.
 - **Local server hardening:** binds to 127.0.0.1; rejects non-localhost `Host` headers (DNS
   rebinding); serves an allowlist only (the app, `lists/`, descriptions, decisions), never dotfiles,
   `..`, Windows 8.3 short names or directories; POSTs need a custom header plus JSON content type,

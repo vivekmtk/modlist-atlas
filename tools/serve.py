@@ -10,8 +10,12 @@ user's lists, descriptions and decisions) and a small JSON API used by the app:
     GET  /api/status                  local mode, defaults, list sources, change flags, shared rules
     GET  /api/profiles?mo2=<folder>   profile names found in an MO2 folder
     POST /api/snapshot                {mo2, profile, name, confirm}  -> runs export_modlist.py
-    POST /api/import                  {kind: "files", name, title, files: [{name, data(base64)}], confirm}
-    POST /api/decisions               {key: {decision?, note?, name?, name_key?}} -> plan/decisions.json
+    POST /api/import                  {kind: "files", name, title, game, files: [{name, data(base64)}], confirm}
+    POST /api/decisions?session=<s>   {key: {decision?, note?, name?, name_key?}} -> plan/sessions/<s>/decisions.json
+    POST /api/session/create          {title, game, from?}  -> a new session, empty or a copy of `from`
+    POST /api/session/rename          {name, title}
+    POST /api/session/delete          {name, confirm}  -> removes plan/sessions/<name>/ (never the last one)
+    POST /api/session/setup           {name, setup}  -> the session's lists and filters in the app
     POST /api/freeze                  {name, frozen}
     POST /api/delete                  {name, confirm}  -> removes lists/<name>/ (decisions are kept)
     POST /api/nexus/lookup            {domain, retry}  -> searches Nexus for name-only mods in the background
@@ -43,10 +47,11 @@ import nexus_match  # noqa: E402
 
 MAX_BODY = 60_000_000  # uploads arrive base64-encoded
 VALID_DECISIONS = {"keep", "drop", "maybe", ""}
-# One writer at a time per kind of data. Snapshots/imports/freeze change lists/;
+# One writer at a time per kind of data. Snapshots/imports/freeze change lists/; sessions and their
 # decisions are small and frequent, so they get their own lock and never wait on a snapshot.
 lists_lock = threading.Lock()
-decisions_lock = threading.Lock()
+plan_lock = threading.Lock()
+MAX_SETUP = 50_000  # characters of the app's saved lists and filters
 # the Nexus name search runs in a background thread; the app polls its progress
 nexus_job = {"running": False, "stop": False, "domain": "", "done": 0, "total": 0, "counts": {}, "error": "", "finished": ""}
 nexus_job_lock = threading.Lock()
@@ -57,6 +62,7 @@ def static_routes():
     return [
         ("/web/", lib.REPO / "web"),
         ("/lists/", lib.LISTS),
+        ("/plan/sessions/", lib.SESSIONS),
     ]
 
 
@@ -64,7 +70,6 @@ STATIC_FILES = {
     "/": lambda: lib.REPO / "index.html",
     "/index.html": lambda: lib.REPO / "index.html",
     "/data/descriptions.json": lambda: lib.DESCRIPTIONS,
-    "/plan/decisions.json": lambda: lib.DECISIONS,
     "/data/nexus_match.json": lambda: nexus_match.MATCHES,
 }
 
@@ -172,6 +177,8 @@ class Handler(SimpleHTTPRequestHandler):
                 "profile": os.environ.get("MO2_PROFILE", "Default"),
                 "list_name": os.environ.get("MO2_LIST_NAME", ""),
                 "nexus_key": bool(os.environ.get("NEXUS_API_KEY")),
+                "mo2_game": lib.nexus_domain(lib.instance_game(Path(os.environ["MO2_PATH"]))) if os.environ.get("MO2_PATH") else "",
+                "games": lib.game_names(),
                 "lists": lists,
                 "problems": problems,
                 "profile_files": lib.PROFILE_FILES,
@@ -191,6 +198,9 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_error(404)
         if resolve_static(url.path) is None:
             return self.send_error(404)
+        # Last-Modified has 1-second resolution: a file rewritten within the same second (sessions
+        # index after a rename + delete) would be answered "304 not modified" with the old content
+        del self.headers["If-Modified-Since"]
         return super().do_GET()
 
     def do_HEAD(self):
@@ -232,10 +242,16 @@ class Handler(SimpleHTTPRequestHandler):
             "/api/nexus/lookup": self.nexus_lookup,
             "/api/nexus/stop": self.nexus_stop,
             "/api/nexus/match": self.nexus_set_match,
+            "/api/session/create": self.create_session,
+            "/api/session/rename": self.rename_session,
+            "/api/session/delete": self.delete_session,
+            "/api/session/setup": self.save_setup,
         }
         handler = routes.get(urlparse(self.path).path)
         if not handler:
             return self.send_error(404)
+        if handler == self.save_decisions:
+            return handler(body, (parse_qs(urlparse(self.path).query).get("session") or [""])[0])
         return handler(body)
 
     def busy(self):
@@ -258,7 +274,8 @@ class Handler(SimpleHTTPRequestHandler):
                     for f in body.get("files") or []:
                         if isinstance(f, dict):
                             named[str(f.get("name", ""))[:260]] = base64.b64decode(str(f.get("data", "")))
-                    result = import_files.import_files(named, name, str(body.get("title", ""))[:200])
+                    result = import_files.import_files(named, name, str(body.get("title", ""))[:200],
+                                                       game=str(body.get("game", "")))
                 else:
                     return self.send_json(400, {"error": "Unknown import kind."})
             except (ValueError, zipfile.BadZipFile, binascii.Error) as e:
@@ -304,11 +321,14 @@ class Handler(SimpleHTTPRequestHandler):
         ok = proc.returncode == 0
         return self.send_json(200 if ok else 500, {"ok": ok, "output": (proc.stdout + proc.stderr)[-6000:]})
 
-    def save_decisions(self, body):
+    def save_decisions(self, body, session):
         """Merge only the fields sent, so a comment save can't undo a decision (or vice versa)."""
-        with decisions_lock:
+        with plan_lock:
+            if not lib.read_session(session):
+                return self.send_json(404, {"error": "Unknown session; reload the page."})
+            path = lib.session_decisions(session)
             try:
-                store = lib.read_json(lib.DECISIONS, {}, strict=True)
+                store = lib.read_json(path, {}, strict=True)
             except lib.CorruptFile as e:
                 return self.send_json(500, {"error": f"Not saved: {e}"})
             for key, val in body.items():
@@ -330,8 +350,74 @@ class Handler(SimpleHTTPRequestHandler):
                 else:
                     cur["updated"] = lib.now_iso()
                     store[key] = cur
-            lib.write_json(lib.DECISIONS, store)
+            lib.write_json(path, store)
             return self.send_json(200, {"ok": True, "count": len(store), "saved": {k: store.get(k) for k in body}})
+
+    def create_session(self, body):
+        title = str(body.get("title", "")).strip()[:80]
+        game = str(body.get("game", ""))
+        if not title:
+            return self.send_json(400, {"error": "Give the session a name."})
+        with plan_lock:
+            setup, decisions = {}, {}
+            if body.get("from"):
+                src = lib.read_session(str(body["from"]))
+                if not src:
+                    return self.send_json(404, {"error": "The session to copy no longer exists."})
+                try:
+                    decisions = lib.read_json(lib.session_decisions(src["name"]), {}, strict=True)
+                except lib.CorruptFile as e:
+                    return self.send_json(500, {"error": f"Not copied: {e}"})
+                game, setup = src["game"], src.get("setup") or {}
+            if not lib.GAME_RE.match(game):
+                return self.send_json(400, {"error": "Game: the Nexus game name from its URL, e.g. skyrimspecialedition."})
+            session = lib.create_session(title, game, setup, decisions)
+        return self.send_json(200, {"ok": True, "session": session})
+
+    def rename_session(self, body):
+        title = str(body.get("title", "")).strip()[:80]
+        if not title:
+            return self.send_json(400, {"error": "Give the session a name."})
+        with plan_lock:
+            session = lib.read_session(str(body.get("name", "")))
+            if not session:
+                return self.send_json(404, {"error": "Unknown session."})
+            session["title"] = title
+            lib.write_json(lib.SESSIONS / session["name"] / "session.json", session)
+            lib.rebuild_sessions_index()
+        return self.send_json(200, {"ok": True})
+
+    def delete_session(self, body):
+        """Always asks first (409 + confirm). Lists are shared, so only the session's decisions go."""
+        with plan_lock:
+            session = lib.read_session(str(body.get("name", "")))
+            if not session:
+                return self.send_json(404, {"error": "Unknown session."})
+            if len(list(lib.SESSIONS.glob("*/session.json"))) < 2:
+                return self.send_json(400, {"error": "This is your only session. Create another one before deleting it."})
+            if not body.get("confirm"):
+                n = len(lib.read_json(lib.session_decisions(session["name"]), {}))
+                return self.send_json(409, {"confirm": f"Delete the session '{session['title']}' and its {n} decision{'' if n == 1 else 's'}? "
+                                                       "Your lists are kept. This can't be undone."})
+            try:
+                shutil.rmtree(lib.SESSIONS / session["name"])
+            except OSError as e:
+                return self.send_json(500, {"error": f"Could not delete '{session['title']}': {e}"})
+            finally:
+                lib.rebuild_sessions_index()
+        return self.send_json(200, {"ok": True})
+
+    def save_setup(self, body):
+        setup = body.get("setup")
+        if not isinstance(setup, dict) or len(json.dumps(setup)) > MAX_SETUP:
+            return self.send_json(400, {"error": "Bad request."})
+        with plan_lock:
+            session = lib.read_session(str(body.get("name", "")))
+            if not session:
+                return self.send_json(404, {"error": "Unknown session."})
+            session["setup"] = setup
+            lib.write_json(lib.SESSIONS / session["name"] / "session.json", session)
+        return self.send_json(200, {"ok": True})
 
     def freeze(self, body):
         name = str(body.get("name", ""))
@@ -440,6 +526,7 @@ class Server(ThreadingHTTPServer):
 
 def make_server(port: int) -> ThreadingHTTPServer:
     lib.rebuild_index()
+    lib.migrate_to_sessions()
     return Server(("127.0.0.1", port), Handler)
 
 

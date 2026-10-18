@@ -1,6 +1,6 @@
 /* Modlist Atlas — browse and compare MO2 modlists.
-   Data: lists/index.json, lists/<name>/mods.json, plan/decisions.json, data/descriptions.json,
-   data/nexus_match.json (Nexus search results for name-only mods).
+   Data: lists/index.json, lists/<name>/mods.json, plan/sessions/index.json, plan/sessions/<s>/{session,decisions}.json,
+   data/descriptions.json, data/nexus_match.json (Nexus search results for name-only mods).
    With tools/serve.py running, /api/* adds Snapshot and decision saving. */
 "use strict";
 
@@ -25,15 +25,37 @@ const UI_DEFAULTS = {
   allCats: false, allSecs: false, ovBase: null, chartAll: false,
 };
 const S = {
+  // a session is one plan: its game, its lists and filters (ui) and its decisions. allLists holds every
+  // game's lists; lists only the session's game (and lists with no game)
+  sessions: [], session: null, allLists: [],
   lists: [], data: {}, decisions: {}, local: null, descriptions: null, catalog: new Map(),
   // Nexus search results; names another list has an ID for; Comment column filter (null = all, else the ticked comments)
   matches: {}, knownNames: new Map(), noteSel: null,
-  ui: Object.assign({}, UI_DEFAULTS, store.get("atlas-ui", {})),
+  ui: Object.assign({}, UI_DEFAULTS),
   search: "", selected: null, navKeys: [], statusProblem: "", compareLimit: 500, lastFocus: null,
   // bulk edit: checkboxes stay hidden until "Select" is toggled on; picked holds catalog keys
   bulk: false, picked: new Set(), bulkDec: "unchanged", bulkNote: "",
 };
-const saveUI = () => store.set("atlas-ui", S.ui);
+
+// The lists and filters are saved with the session (debounced; flushed when the page closes)
+let setupTimer = null, savedSetup = "";
+function saveUI() {
+  if (!S.local || !S.session) return;
+  clearTimeout(setupTimer);
+  setupTimer = setTimeout(flushUI, 500);
+}
+function flushUI() {
+  clearTimeout(setupTimer);
+  const setup = JSON.stringify(S.ui);
+  if (!S.local || !S.session || setup === savedSetup) return;
+  savedSetup = setup;
+  fetch("api/session/setup", { method: "POST", headers: API_HEADERS, keepalive: true, body: JSON.stringify({ name: S.session.name, setup: S.ui }) })
+    .catch(() => { savedSetup = ""; });
+}
+window.addEventListener("pagehide", flushUI);
+const gameOf = () => S.session?.game || "";
+const gameLabel = (d) => S.local?.games?.[d] || d || "any game";
+const sessionPath = (f) => `plan/sessions/${encodeURIComponent(S.session.name)}/${f}`;
 
 // ------------------------------------------------------------------ loading
 
@@ -58,13 +80,33 @@ async function getJSON(url) {
   return r.json();
 }
 
+async function loadSession() {
+  S.sessions = await getJSON("plan/sessions/index.json").catch(() => []);
+  const meta = S.sessions.find((x) => x.name === store.get("atlas-session", null)) || S.sessions[0];
+  if (!meta) { S.session = null; return; }
+  if (meta.name === S.session?.name) { S.session = { ...S.session, ...meta }; return; }
+  const session = await getJSON(`plan/sessions/${encodeURIComponent(meta.name)}/session.json`).catch(() => ({ ...meta, setup: {} }));
+  let setup = session.setup || {};
+  if (!Object.keys(setup).length) {
+    // lists and filters saved in this browser before sessions existed go to the first session opened
+    setup = store.get("atlas-ui", {});
+    try { localStorage.removeItem("atlas-ui"); } catch (e) { /* storage unavailable */ }
+  }
+  S.ui = Object.assign({}, UI_DEFAULTS, setup);
+  savedSetup = JSON.stringify(S.ui);
+  S.session = session;
+}
+
 async function loadAll() {
-  S.lists = await getJSON("lists/index.json");
+  await loadSession();
+  S.allLists = await getJSON("lists/index.json");
+  S.lists = S.session ? S.allLists.filter((l) => !l.game || l.game === gameOf()) : [];
   assignColors();
+  S.data = {};
   await Promise.all(S.lists.map(async (l) => {
     S.data[l.name] = await getJSON(`lists/${encodeURIComponent(l.name)}/mods.json`).catch(() => []);
   }));
-  S.decisions = await getJSON("plan/decisions.json").catch(() => ({}));
+  S.decisions = S.session ? await getJSON(sessionPath("decisions.json")).catch(() => ({})) : {};
   S.matches = await getJSON("data/nexus_match.json").catch(() => ({}));
   S.statusProblem = "";
   try {
@@ -87,8 +129,15 @@ async function loadAll() {
 }
 
 function firstRunHTML() {
+  if (!S.session) {
+    return S.local
+      ? `<div class="first-session">${emptyState("Start your first session", `A session is one plan for one game: the lists you compare and your keep / drop decisions.
+          You can add more sessions later, for another game or another plan.`)}${sessionFormHTML()}</div>`
+      : emptyState("No sessions yet", "Start the local server (<code>Modlist Atlas.bat</code> or <code>python tools/serve.py</code>) to create one.");
+  }
+  const other = S.allLists.length ? ` Lists for other games show in sessions for those games.` : "";
   return S.local
-    ? emptyState("No lists yet", `Add a snapshot of an MO2 profile, or upload profile files (a folder, a .zip, or a modlist.txt).
+    ? emptyState(`No ${gameLabel(gameOf())} lists yet`, `Add a snapshot of an MO2 profile, or upload profile files (a folder, a .zip, or a modlist.txt).${other}
         <div class="empty-actions"><button class="btn primary" data-act="add-list">+ Add your first list</button></div>`)
     : emptyState("No lists yet", "Start the local server (<code>Modlist Atlas.bat</code> or <code>python tools/serve.py</code>) to add lists.");
 }
@@ -99,14 +148,13 @@ async function init() {
   } catch (e) {
     S.lists = [];
   }
-  $("#snapshotBtn").hidden = !S.local;
-  $("#nexusBtn").hidden = !S.local;
+  $("#snapshotBtn").hidden = !S.local || !S.session;
+  $("#nexusBtn").hidden = !S.local || !S.session;
   let hash = "";
   try { hash = decodeURIComponent(location.hash.slice(1)); } catch (e) { hash = ""; }
   if (!S.lists.length) {
-    $("#listbar").innerHTML = "";
-    $("#app").innerHTML = firstRunHTML();
-    renderFooter();
+    render();
+    if (!S.session) return;
     if (hash.startsWith("add") && S.local) openAddList("mo2");
     return;
   }
@@ -118,8 +166,8 @@ async function init() {
 
 // ------------------------------------------------------------------ catalog: one record per mod across lists
 
-// Nexus search result for a name-only mod, in the game last searched (tools/nexus_match.py)
-const nexusMatchOf = (nameKey) => (S.matches.domain ? S.matches.games?.[S.matches.domain]?.[nameKey] : null) || null;
+// Nexus search result for a name-only mod, in the session's game (tools/nexus_match.py)
+const nexusMatchOf = (nameKey) => S.matches.games?.[gameOf()]?.[nameKey] || null;
 const isMatched = (entry) => (entry?.status === "auto" || entry?.status === "accepted") && entry.id;
 
 function buildCatalog() {
@@ -134,7 +182,7 @@ function buildCatalog() {
   for (const l of S.lists) for (const m of S.data[l.name]) {
     let key = m.key;
     const nx = key.startsWith("name:") && !nameIdx.has(key) ? nexusMatchOf(key) : null;
-    if (key.startsWith("name:")) key = nameIdx.get(key) || (isMatched(nx) ? `${S.matches.domain}/${nx.id}` : key);
+    if (key.startsWith("name:")) key = nameIdx.get(key) || (isMatched(nx) ? `${gameOf()}/${nx.id}` : key);
     m.ck = key; m.list = l.name;
     let rec = S.catalog.get(key);
     if (!rec) { rec = { key, entries: {}, names: new Set(), nms: [] }; S.catalog.set(key, rec); }
@@ -150,7 +198,7 @@ function buildCatalog() {
     for (const { entry } of rec.nms) {
       const c = isMatched(entry) && entry.candidates.find((x) => x.id === entry.id);
       if (!c) continue;
-      rec.url ||= `https://www.nexusmods.com/${S.matches.domain}/mods/${c.id}`;
+      rec.url ||= `https://www.nexusmods.com/${gameOf()}/mods/${c.id}`;
       rec.nexus_id ||= c.id;
       for (const f of ["author", "picture", "endorsements"]) if (!rec[f] && c[f]) rec[f] = c[f];
       if (!rec.category && c.category) rec.category = c.category;
@@ -366,16 +414,17 @@ function relTime(iso) {
 // ------------------------------------------------------------------ main render
 
 function render() {
-  if (!S.lists.length) { $("#app").innerHTML = firstRunHTML(); renderFooter(); return; }
-  const token = focusToken();
-  document.querySelectorAll(".tab").forEach((t) => t.setAttribute("aria-selected", String(t.dataset.tab === S.ui.tab)));
-  if (location.hash.slice(1) !== S.ui.tab) history.replaceState(null, "", "#" + S.ui.tab);
-  renderListbar();
+  // header badges first: they also apply to a session without lists
   const changed = S.local && Object.values(S.local.lists || {}).some((s) => s.changed);
   $("#changedDot").hidden = !changed;
   const toReview = reviewCount();
   $("#nexusCount").hidden = !toReview;
   $("#nexusCount").textContent = toReview;
+  if (!S.lists.length) { $("#listbar").innerHTML = sessionBarHTML(); $("#app").innerHTML = firstRunHTML(); renderFooter(); return; }
+  const token = focusToken();
+  document.querySelectorAll(".tab").forEach((t) => t.setAttribute("aria-selected", String(t.dataset.tab === S.ui.tab)));
+  if (location.hash.slice(1) !== S.ui.tab) history.replaceState(null, "", "#" + S.ui.tab);
+  renderListbar();
   if (S.ui.tab === "compare") renderCompare();
   else if (S.ui.tab === "overview") renderOverview();
   else renderBrowse();
@@ -436,7 +485,7 @@ function renderListbar() {
   }).join("");
   const reset = tab === "compare" && Object.values(S.ui.tri).some((v) => v && v !== "any")
     ? `<button class="btn ghost" data-act="tri-reset">Reset</button>` : "";
-  $("#listbar").innerHTML = `<span class="listbar-label">${label}</span>${chips}${reset}`;
+  $("#listbar").innerHTML = `${sessionBarHTML()}<span class="listbar-sep" aria-hidden="true"></span><span class="listbar-label">${label}</span>${chips}${reset}`;
 }
 
 // ------------------------------------------------------------------ sidebar
@@ -833,7 +882,7 @@ function nexusBoxHTML(rec) {
   return rec.nms.map(({ key, entry }) => {
     if (entry.status === "suggest") {
       const cands = entry.candidates.map((c) => {
-        const url = `https://www.nexusmods.com/${encodeURIComponent(S.matches.domain)}/mods/${encodeURIComponent(c.id)}`;
+        const url = `https://www.nexusmods.com/${encodeURIComponent(gameOf())}/mods/${encodeURIComponent(c.id)}`;
         const meta = [c.author && `by ${esc(c.author)}`, esc(c.category), c.endorsements ? `${Number(c.endorsements).toLocaleString()} endorsements` : ""].filter(Boolean).join(" · ");
         return `<div class="nxcand"><div class="nxinfo"><a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(c.name)} ↗</a>
           <div class="muted">${meta}</div>${c.summary ? `<div class="nxsum">${esc(c.summary)}</div>` : ""}</div>${btn(key, "accept", "Accept", "btn", c.id)}</div>`;
@@ -853,11 +902,11 @@ function nexusBoxHTML(rec) {
 async function setNexusMatch(nkey, action, id) {
   if (!S.local) { toast("Read-only — run python tools/serve.py to confirm matches"); return; }
   try {
-    const body = { domain: S.matches.domain, key: nkey, action, ...(id ? { id: Number(id) } : {}) };
+    const body = { domain: gameOf(), key: nkey, action, ...(id ? { id: Number(id) } : {}) };
     const r = await fetch("api/nexus/match", { method: "POST", headers: API_HEADERS, body: JSON.stringify(body) });
     const j = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
-    S.matches.games[S.matches.domain][nkey] = j.entry;
+    S.matches.games[gameOf()][nkey] = j.entry;
   } catch (e) {
     toast("Could not save: " + e.message);
     return;
@@ -901,7 +950,7 @@ async function saveDecisions(keys, patch) {
     if (rec) body[decKey(key)] = { ...patch, name: recName(rec), name_key: normName(recName(rec)) };
   }
   try {
-    const r = await fetch("api/decisions", { method: "POST", headers: API_HEADERS, body: JSON.stringify(body) });
+    const r = await fetch(`api/decisions?session=${encodeURIComponent(S.session.name)}`, { method: "POST", headers: API_HEADERS, body: JSON.stringify(body) });
     const j = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
     for (const dk of Object.keys(body)) {
@@ -1017,6 +1066,7 @@ function renderModalTab(prefill = {}) {
       </div>
       <div class="file-chips" id="fileChips"></div>
       ${nameField("upName", prefill.name || "")}
+      ${gameFieldHTML("upGame", gameOf(), "The list shows in sessions for this game.")}
       <div class="field"><label for="upTitle">Title (optional)</label><input id="upTitle" placeholder="e.g. Friend's survival list" maxlength="200"></div>
       <div class="help upload-note">Without the mods folder there are no Nexus IDs; mods are matched to your other lists by name.</div>
       <div class="modal-actions"><button class="btn ghost" data-act="modal-close">Cancel</button><button class="btn primary" id="goBtn" data-act="import-files">Import</button></div>
@@ -1111,9 +1161,15 @@ async function postWithConfirm(url, body, onDone) {
     $("#modalLog").innerHTML = `<div class="log">${esc(j.output || j.error || "")}</div>`;
     if (!r.ok || !j.ok) throw new Error(j.error || "Failed — see the log.");
     await loadAll();
+    closeModal();
+    const added = S.allLists.find((l) => l.name === body.name);
+    if (added && !S.lists.includes(added)) {
+      render();
+      toast(`${onDone}. It's a ${gameLabel(added.game)} list, so it shows in your ${gameLabel(added.game)} sessions.`);
+      return;
+    }
     S.ui.primary = body.name;
     S.ui.tab = "browse";
-    closeModal();
     render();
     toast(onDone);
   } catch (e) {
@@ -1157,7 +1213,7 @@ function runSnapshot() {
 async function runImportFiles() {
   if (!uploads.length) { toast("Pick the profile files first"); return; }
   const files = await Promise.all(uploads.map(async (f) => ({ name: f.name, data: await readB64(f) })));
-  const body = { kind: "files", name: $("#upName").value.trim(), title: $("#upTitle").value.trim(), files };
+  const body = { kind: "files", name: $("#upName").value.trim(), title: $("#upTitle").value.trim(), game: gameValue("upGame"), files };
   postWithConfirm("api/import", body, `Imported '${body.name}'`);
 }
 
@@ -1178,6 +1234,141 @@ async function deleteList(name, confirm = false) {
   }
 }
 
+// ------------------------------------------------------------------ sessions
+
+// first in the list bar: the lists below it are the session's
+function sessionBarHTML() {
+  if (!S.session) return "";
+  return `<span class="listbar-label">Session</span><button class="btn sm session-btn" id="sessionBtn" data-act="sessions" aria-haspopup="dialog" title="Switch or manage sessions">
+    <span class="ses-title">${esc(S.session.title)}</span><span class="ses-game">${esc(gameLabel(gameOf()))}</span><span class="ses-caret" aria-hidden="true">▾</span></button>`;
+}
+
+// Known games from MO2 (server), or any other Nexus game name typed in
+function gameFieldHTML(id, value, help = "") {
+  const games = S.local?.games || {};
+  const known = value in games;
+  return `<div class="field"><label for="${id}">Game</label>
+    <select id="${id}" data-act="game-pick">${Object.entries(games).map(([d, t]) => `<option value="${esc(d)}" ${d === value ? "selected" : ""}>${esc(t)}</option>`).join("")}
+      <option value="" ${known ? "" : "selected"}>Other game…</option></select>
+    <input id="${id}Other" class="game-other" ${known ? "hidden" : ""} value="${known ? "" : esc(value)}" placeholder="Nexus game name from its URL, e.g. cyberpunk2077" spellcheck="false" autocomplete="off" aria-label="Nexus game name">
+    ${help ? `<div class="help">${help}</div>` : ""}</div>`;
+}
+const gameValue = (id) => ($(`#${id}`).value || $(`#${id}Other`).value).trim().toLowerCase();
+
+// the game a new session starts with: the open session's, else the MO2 install's, else the lists'
+function suggestedGame() {
+  if (S.session) return gameOf();
+  if (S.local?.mo2_game) return S.local.mo2_game;
+  const counts = countBy(S.allLists.filter((l) => l.game), (l) => l.game);
+  return [...counts].sort((a, b) => b[1] - a[1])[0]?.[0] || "skyrimspecialedition";
+}
+
+function sessionFormHTML() {
+  const from = S.sessions.length ? `<div class="field"><label for="sesFrom">Start from</label><select id="sesFrom">
+      <option value="">Empty: no decisions yet</option>${S.sessions.map((x) => `<option value="${esc(x.name)}">Copy of ${esc(x.title)} (decisions and lists)</option>`).join("")}</select></div>` : "";
+  return `<div class="ses-form"><div class="field"><label for="sesTitle">Name</label><input id="sesTitle" maxlength="80" placeholder="e.g. Skyrim on Nordic Souls, Morrowind 2026" autocomplete="off"></div>
+    ${from}${gameFieldHTML("sesGame", suggestedGame())}
+    <div class="modal-actions"><button class="btn primary" id="goBtn" data-act="ses-create">Create session</button></div></div>`;
+}
+
+// a copy takes the game of the session it copies
+function syncSessionForm() {
+  const from = S.sessions.find((x) => x.name === $("#sesFrom")?.value);
+  const sel = $("#sesGame");
+  if (from) {
+    sel.value = from.game in (S.local?.games || {}) ? from.game : "";
+    $("#sesGameOther").value = sel.value ? "" : from.game;
+    $("#sesGameOther").hidden = !!sel.value;
+  }
+  sel.disabled = $("#sesGameOther").disabled = !!from;
+}
+
+function openSessions() {
+  const rows = S.sessions.map((x) => {
+    const cur = x.name === S.session?.name;
+    const acts = S.local ? `<button class="btn sm ghost" data-act="ses-dup" data-v="${esc(x.name)}">Duplicate</button>
+      <button class="btn sm ghost" data-act="ses-rename" data-v="${esc(x.name)}">Rename</button>
+      ${S.sessions.length > 1 ? `<button class="btn sm ghost danger" data-act="ses-delete" data-v="${esc(x.name)}">Delete</button>` : ""}` : "";
+    return `<div class="ses-row ${cur ? "current" : ""}"><button class="ses-pick" data-act="ses-switch" data-v="${esc(x.name)}" ${cur ? 'aria-current="true"' : ""}>
+      <b>${esc(x.title)}</b><span class="muted">${esc(gameLabel(x.game))}${cur ? " · open" : ""}</span></button>${acts}</div>`;
+  }).join("");
+  openModal(`<div class="modal-head"><h2 id="modalTitle">Sessions</h2><button class="btn icon ghost" data-act="modal-close" aria-label="Close">×</button></div>
+    <div class="modal-body"><p class="intro">Each session is one plan for one game, with its own lists, filters and keep / drop decisions. Lists are shared: a list shows in every session for its game.</p>
+      <div class="ses-list">${rows}</div>
+      ${S.local ? `<h3 class="ses-new">New session</h3>${sessionFormHTML()}` : ""}</div>`);
+}
+
+async function switchSession(name) {
+  if (name === S.session?.name) return;
+  flushUI();
+  store.set("atlas-session", name);
+  closeDrawer();
+  Object.assign(S, { bulk: false, noteSel: null, search: "", compareLimit: 500 });
+  S.picked.clear();
+  $("#search").value = "";
+  await loadAll();
+  render();
+  window.scrollTo(0, 0);
+  toast(`Opened ${S.session.title}`);
+}
+
+async function postSession(action, body) {
+  const r = await fetch(`api/session/${action}`, { method: "POST", headers: API_HEADERS, body: JSON.stringify(body) });
+  const j = await r.json().catch(() => ({ error: `HTTP ${r.status}` }));
+  if (r.status === 409 && j.confirm) return window.confirm(j.confirm) ? postSession(action, { ...body, confirm: true }) : null;
+  if (!r.ok || !j.ok) throw new Error(j.error || `HTTP ${r.status}`);
+  return j;
+}
+
+async function createSession() {
+  const body = { title: $("#sesTitle").value.trim(), game: gameValue("sesGame"), from: $("#sesFrom")?.value || "" };
+  if (!body.title) { toast("Give the session a name"); $("#sesTitle").focus(); return; }
+  try {
+    const j = await postSession("create", body);
+    closeModal();
+    flushUI();
+    store.set("atlas-session", j.session.name);
+    S.session = null; // load the new session's own lists and filters
+    await init();
+    toast(`Created ${j.session.title}`);
+  } catch (e) {
+    toast(e.message);
+  }
+}
+
+async function renameSession(name) {
+  const cur = S.sessions.find((x) => x.name === name);
+  const title = window.prompt("New name for this session:", cur.title);
+  if (!title?.trim() || title.trim() === cur.title) return;
+  try {
+    await postSession("rename", { name, title: title.trim() });
+    await loadSession();
+    render();
+    openSessions();
+  } catch (e) {
+    toast(e.message);
+  }
+}
+
+async function deleteSession(name) {
+  try {
+    if (!(await postSession("delete", { name }))) return;
+    if (name === S.session?.name) {
+      store.set("atlas-session", null);
+      S.session = null;
+      closeModal();
+      await loadAll();
+      render();
+    } else {
+      await loadSession();
+      openSessions();
+    }
+    toast("Session deleted");
+  } catch (e) {
+    toast(e.message);
+  }
+}
+
 // ------------------------------------------------------------------ Nexus name search (tools/nexus_match.py)
 
 // names without a Nexus ID that no other list can supply one for
@@ -1187,16 +1378,9 @@ function unmatchedNames() {
   return keys;
 }
 
-function defaultGame() {
-  if (S.matches.domain) return S.matches.domain;
-  const counts = countBy(Object.values(S.data).flat().filter((m) => m.domain), (m) => m.domain);
-  return [...counts].sort((a, b) => b[1] - a[1])[0]?.[0] || "skyrimspecialedition";
-}
-
 function nexusSummary() {
-  const domain = ($("#nxGame")?.value || "").trim().toLowerCase();
   const retry = $("#nxRetry")?.checked;
-  const game = S.matches.games?.[domain] || {};
+  const game = S.matches.games?.[gameOf()] || {};
   const names = unmatchedNames();
   let cached = 0, misses = 0;
   for (const k of names) if (game[k]) { cached++; if (game[k].status === "none") misses++; }
@@ -1208,20 +1392,17 @@ function nexusSummary() {
 
 let nexusPoll = null;
 async function openNexusLookup() {
-  const domains = [...new Set([defaultGame(), ...Object.keys(S.matches.games || {}), ...Object.values(S.data).flat().map((m) => m.domain).filter(Boolean)])];
   openModal(`<div class="modal-head"><h2 id="modalTitle">Find mods on Nexus</h2><button class="btn icon ghost" data-act="modal-close" aria-label="Close">×</button></div>
     <div class="modal-body">
       <p class="intro">Uploaded lists only have mod names. This searches Nexus Mods for each name and links the mod when exactly one Nexus mod has that title. Close matches are kept as suggestions for you to confirm in the mod's details. Results are saved, so a name is only searched once. Only mod names are sent to Nexus.</p>
-      <div class="field"><label for="nxGame">Nexus game</label><input id="nxGame" list="nxGames" value="${esc(defaultGame())}" spellcheck="false" autocomplete="off">
-        <datalist id="nxGames">${domains.map((d) => `<option value="${esc(d)}">`).join("")}</datalist>
-        <div class="help">As in the game's Nexus URL, e.g. <code>skyrimspecialedition</code>, <code>fallout4</code>.</div></div>
+      <div class="field"><label>Nexus game</label><div>${esc(gameLabel(gameOf()))} <code>${esc(gameOf())}</code></div>
+        <div class="help">The session's game. Its ${S.lists.length} list${S.lists.length === 1 ? "" : "s"} are searched; to search another game, switch to a session for it.</div></div>
       <label class="check"><input type="checkbox" id="nxRetry"> Search again for names that weren't found last time</label>
       <div class="nxsummary" id="nxSummary"></div>
       <div id="nxProgress"></div>
       <div class="modal-actions" id="nxActions"><button class="btn ghost" data-act="modal-close">Close</button><button class="btn primary" id="goBtn" data-act="nx-go">Search Nexus</button></div>
     </div>`);
   const update = () => { $("#nxSummary").innerHTML = nexusSummary(); };
-  $("#nxGame").addEventListener("input", update);
   $("#nxRetry").addEventListener("change", update);
   update();
   const r = await fetch("api/nexus/progress").then((x) => x.json()).catch(() => null);
@@ -1229,7 +1410,7 @@ async function openNexusLookup() {
 }
 
 async function startNexusLookup() {
-  const domain = $("#nxGame").value.trim().toLowerCase();
+  const domain = gameOf();
   try {
     const r = await fetch("api/nexus/lookup", { method: "POST", headers: API_HEADERS, body: JSON.stringify({ domain, retry: $("#nxRetry").checked }) });
     const j = await r.json().catch(() => ({}));
@@ -1539,6 +1720,16 @@ document.addEventListener("click", (ev) => {
     case "nx-go": startNexusLookup(); break;
     case "nx-stop": fetch("api/nexus/stop", { method: "POST", headers: API_HEADERS, body: "{}" }); break;
     case "nx-review": closeModal(); S.ui.onlyReview = true; S.ui.tab = "compare"; render(); window.scrollTo(0, 0); break;
+    case "sessions": openSessions(); break;
+    case "ses-switch": closeModal(); switchSession(d.v); break;
+    case "ses-dup": {
+      const from = S.sessions.find((x) => x.name === d.v);
+      $("#sesFrom").value = d.v; syncSessionForm();
+      $("#sesTitle").value = `${from.title} (copy)`; $("#sesTitle").focus(); $("#sesTitle").select(); break;
+    }
+    case "ses-rename": renameSession(d.v); break;
+    case "ses-delete": deleteSession(d.v); break;
+    case "ses-create": createSession(); break;
     case "freeze": {
       const l = listByName(d.list);
       fetch("api/freeze", { method: "POST", headers: { "Content-Type": "application/json", "X-Modlist-Atlas": "1" }, body: JSON.stringify({ name: d.list, frozen: !l.frozen }) })
@@ -1553,6 +1744,8 @@ document.addEventListener("change", (ev) => {
   const el = ev.target;
   if (el.dataset?.act === "select-ui") { S.ui[el.dataset.k] = el.value; render(); }
   if (el.dataset?.act === "bulk-dec") S.bulkDec = el.value;
+  if (el.dataset?.act === "game-pick") { $(`#${el.id}Other`).hidden = !!el.value; if (!el.value) $(`#${el.id}Other`).focus(); }
+  if (el.id === "sesFrom") syncSessionForm();
 });
 
 document.querySelectorAll(".tab").forEach((t) => t.addEventListener("click", () => {

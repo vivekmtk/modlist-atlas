@@ -33,7 +33,8 @@ others. Vortex lists aren't supported.
    git clone https://github.com/vivekmtk/modlist-atlas.git
    ```
 3. Double-click **`Modlist Atlas.bat`**. Your browser opens `http://localhost:8000`.
-4. Click **+ Add list** and pick one:
+4. Name your first **session** and pick its game (see [Sessions](#keep-separate-plans-in-sessions)).
+5. Click **+ Add list** and pick one:
    - **MO2 profile**: point it at your Mod Organizer 2 folder and choose a profile.
    - **Upload files**: drop in a profile's `modlist.txt` (plus `plugins.txt` and INIs if you have
      them), a whole profile folder, or a `.zip`. Use this for lists you haven't installed, for
@@ -74,7 +75,27 @@ Click a mod for its details: its description, a Nexus link, and which lists cont
 In tables, the small **K / D / ?** buttons on each row do the same without opening the mod.
 
 Decisions follow the mod, not the list. A mod you marked *keep* shows as *keep* in every list that
-has it, and decisions survive re-snapshots and deleting lists.
+has it, and decisions survive re-snapshots and deleting lists. Each session has its own decisions.
+
+### Keep separate plans in sessions
+
+A session is one plan for one game: the lists you compare, your filters, and your keep / drop
+decisions. Click the session name at the left of the list bar to switch sessions or manage them.
+For example, keep your Skyrim plan while you start a Morrowind one, or try a second Skyrim plan
+on another base list.
+
+- **New session**: give it a name and a game. It starts with no decisions.
+- **Duplicate**: copies a session's decisions and setup under a new name. Use it to try a
+  variation without losing the original.
+- **Rename** and **Delete** do what they say. Deleting a session removes only its decisions. Your
+  lists stay.
+
+Lists are shared. A session shows every list for its game, so you add or re-snapshot a list once and
+use it in all of them. When you upload a list, choose its game (it defaults to the session's).
+**Find on Nexus** searches the session's game. The app reopens the session you used last.
+
+When you upgrade from a version without sessions, your existing decisions move into a session named
+*Default* for the game most of your lists are for. Rename it to whatever you like.
 
 ### Find uploaded mods on Nexus
 
@@ -152,7 +173,7 @@ Everything stays in the project folder, unless you set `ATLAS_HOME` to use anoth
 | Folder | Contents |
 |---|---|
 | `lists/<name>/` | Snapshots: `MODLIST.md`, `MODLIST_BY_CATEGORY.md`, `LOADORDER.md`, `mods.csv`/`json`, MO2 profile files |
-| `plan/` | `decisions.json`: your keep / drop / maybe decisions and comments |
+| `plan/sessions/<session>/` | `decisions.json`: the session's keep / drop / maybe decisions and comments; `session.json`: its name, game, lists and filters |
 | `data/` | Nexus descriptions read from MO2, Nexus API results, and **Find on Nexus** results and your choices (`nexus_match.json`) |
 | `.env`, `.lists.local.json` | Your settings and which MO2 folder each list came from |
 
@@ -188,7 +209,7 @@ The same snapshots and imports are available without the web app:
 python tools/export_modlist.py                                   # snapshot using .env
 python tools/export_modlist.py --mo2 "<MO2 folder>" --profile "<profile>" --name <list>
 python tools/export_modlist.py --name <list> --freeze            # ask before overwriting
-python tools/import_files.py "<profile folder | .zip | files>" --name <list>
+python tools/import_files.py "<profile folder | .zip | files>" --name <list> --game <nexus game, e.g. morrowind>
 python tools/serve.py --port 8123 --no-browser                   # another port, no browser
 ```
 

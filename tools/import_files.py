@@ -1,7 +1,7 @@
 """
 Import a modlist from MO2 profile files when the MO2 install itself isn't available.
 
-    python tools/import_files.py <profile folder | profile .zip | files...> --name friend --title "Friend's list"
+    python tools/import_files.py <profile folder | profile .zip | files...> --name friend --title "Friend's list" --game skyrimspecialedition
 
 Accepts a profile folder, a .zip of one, or loose files. modlist.txt is required;
 plugins.txt, loadorder.txt and the INIs are picked up when present. Without the
@@ -62,15 +62,18 @@ def collect(named: dict) -> dict:
     return out
 
 
-def import_files(named: dict, name: str, title: str = "", origin: str = "") -> dict:
+def import_files(named: dict, name: str, title: str = "", origin: str = "", game: str = "") -> dict:
     if not lib.valid_name(name):
         raise ValueError(lib.NAME_ERROR)
+    if game and not lib.GAME_RE.match(game):
+        raise ValueError("Game: the Nexus game name from its URL, e.g. skyrimspecialedition.")
     files = collect(named)
     if "modlist.txt" not in files:
         raise ValueError("No modlist.txt found. Add the profile's modlist.txt (or a folder/zip containing it).")
     return lib.build_text_list(name, files, {
         "title": title or name,
         "source": "upload",
+        "game": game,  # uploads have no Nexus IDs to tell; '' shows the list in every session
         "source_label": "Uploaded profile files" + (f" ({origin})" if origin else ""),
         "uploaded_files": sorted(files),
     })
@@ -81,6 +84,7 @@ def main():
     ap.add_argument("paths", nargs="+", type=Path, help="profile folder, .zip, or individual files")
     ap.add_argument("--name", required=True, help="snapshot name, saved to lists/<name>/")
     ap.add_argument("--title", default="", help="display title")
+    ap.add_argument("--game", default="", help="Nexus game name from its URL, e.g. skyrimspecialedition")
     args = ap.parse_args()
     named = {}
     for p in args.paths:
@@ -93,7 +97,7 @@ def main():
         else:
             sys.exit(f"Not found: {p}")
     try:
-        info = import_files(named, args.name, args.title)
+        info = import_files(named, args.name, args.title, game=args.game)
     except (ValueError, zipfile.BadZipFile) as e:
         sys.exit(str(e))
     print(f"Imported '{info['name']}': {info['mods']} mods in {info['sections']} sections "

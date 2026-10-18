@@ -19,7 +19,8 @@ HOME = Path(os.environ.get("ATLAS_HOME") or REPO).resolve()
 LISTS = HOME / "lists"
 DATA = HOME / "data"
 PLAN = HOME / "plan"
-DECISIONS = PLAN / "decisions.json"
+SESSIONS = PLAN / "sessions"  # one folder per session: session.json (title, game, setup) + decisions.json
+LEGACY_DECISIONS = PLAN / "decisions.json"  # before sessions; moved into the first session on upgrade
 NEXUS_CACHE = DATA / "nexus_cache.json"
 DESCRIPTIONS = DATA / "descriptions.json"
 LOCAL_SOURCES = HOME / ".lists.local.json"  # machine-specific: list name -> MO2 path/profile
@@ -27,6 +28,8 @@ LOCAL_SOURCES = HOME / ".lists.local.json"  # machine-specific: list name -> MO2
 NAME_PATTERN = r"^[a-z0-9][a-z0-9._-]{0,40}$"
 NAME_RE = re.compile(NAME_PATTERN)
 # Windows reserved device names can't be folder names
+GAME_PATTERN = r"^[a-z0-9]{1,40}$"  # a Nexus game domain, as in its URLs
+GAME_RE = re.compile(GAME_PATTERN)
 RESERVED_NAMES = {"con", "prn", "aux", "nul", *(f"com{i}" for i in range(10)), *(f"lpt{i}" for i in range(10))}
 # MO2's game short name (gameName in each mod's meta.ini) -> Nexus Mods game domain.
 # Games not listed fall back to the short name in lowercase, which matches Nexus for most games.
@@ -458,6 +461,82 @@ def rebuild_index():
             items.append(info)
     items.sort(key=lambda i: (i.get("order", 50), i["name"]))
     write_json(LISTS / "index.json", items, indent=1)
+
+
+def main_game(mods) -> str:
+    """The Nexus game most mods belong to ('' when none has one, e.g. an uploaded list)."""
+    counts = {}
+    for m in mods:
+        if m.get("domain"):
+            counts[m["domain"]] = counts.get(m["domain"], 0) + 1
+    return max(counts, key=counts.get) if counts else ""
+
+
+def game_names() -> dict:
+    """Nexus game domain -> display name, for the games MO2 knows by name."""
+    out = {}
+    for display, short in GAME_DISPLAY_NAMES.items():
+        out.setdefault(nexus_domain(short), display)
+    return out
+
+
+# ---------------------------------------------------------------- sessions
+
+def session_decisions(name: str) -> Path:
+    return SESSIONS / name / "decisions.json"
+
+
+def read_session(name: str):
+    return read_json(SESSIONS / name / "session.json", None) if valid_name(name) else None
+
+
+def rebuild_sessions_index():
+    """plan/sessions/index.json: every session's name, title and game, read by the web app."""
+    items = []
+    for path in sorted(SESSIONS.glob("*/session.json")):
+        s = read_json(path, None)
+        if s:
+            items.append({k: s.get(k, "") for k in ("name", "title", "game", "created")})
+    items.sort(key=lambda s: (s["title"].lower(), s["name"]))
+    write_json(SESSIONS / "index.json", items)
+
+
+def create_session(title: str, game: str, setup=None, decisions=None) -> dict:
+    """A new session folder named after the title (made unique), with its own decisions."""
+    base = re.sub(r"-{2,}", "-", slug(title))[:36]
+    if not valid_name(base):
+        base = "session"
+    name, i = base, 2
+    while (SESSIONS / name).exists():
+        name, i = f"{base}-{i}", i + 1
+    session = {"name": name, "title": title, "game": game, "created": now_iso(), "setup": setup or {}}
+    write_json(session_decisions(name), decisions or {})
+    write_json(SESSIONS / name / "session.json", session)
+    rebuild_sessions_index()
+    return session
+
+
+def migrate_to_sessions():
+    """Upgrade from one shared decisions file: give every list a game, then move the decisions into
+    a first session for the game most lists are for. A fresh install gets no session; the app asks
+    for one. Runs again after a crash mid-way, because the old file is only renamed at the end."""
+    if any(SESSIONS.glob("*/session.json")):
+        return
+    infos = {p.parent.name: read_json(p, None) for p in LISTS.glob("*/info.json")}
+    infos = {n: i for n, i in infos.items() if i}
+    if not infos and not LEGACY_DECISIONS.exists():
+        return
+    games = {n: i.get("game", main_game(read_json(LISTS / n / "mods.json", []))) for n, i in infos.items()}
+    known = [g for g in games.values() if g]
+    game = max(set(known), key=known.count) if known else "skyrimspecialedition"
+    for n, info in infos.items():
+        if "game" not in info:
+            info["game"] = games[n] or game  # uploads have no Nexus IDs: they go with the other lists
+            write_json(LISTS / n / "info.json", info)
+    rebuild_index()
+    create_session("Default", game, decisions=read_json(LEGACY_DECISIONS, {}, strict=True))
+    if LEGACY_DECISIONS.exists():
+        os.replace(LEGACY_DECISIONS, LEGACY_DECISIONS.with_name("decisions.before-sessions.json"))
 
 
 def build_text_list(name: str, files: dict, info: dict) -> dict:
