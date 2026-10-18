@@ -14,6 +14,13 @@ when you ask it to: with a Nexus API key, or when you click **Find on Nexus**.
 
 <sub>Screenshots show a small demo with three sample lists.</sub>
 
+**Contents:** [What it helps you answer](#what-it-helps-you-answer) ·
+[Quick start](#quick-start) · [A tour](#a-tour) · [Keyboard shortcuts](#keyboard-shortcuts) ·
+[Optional settings](#optional-settings) · [Privacy and safety](#privacy-and-safety) ·
+[Where your data lives](#where-your-data-lives) · [Good to know](#good-to-know) ·
+[Development](#development) · [Feedback](#feedback) · [Credits and notes](#credits-and-notes) ·
+[License](#license)
+
 ## What it helps you answer
 
 - *Which of my mods does the new list already include, and which would I lose?*
@@ -33,6 +40,10 @@ others. Vortex lists aren't supported.
    git clone https://github.com/vivekmtk/modlist-atlas.git
    ```
 3. Double-click **`Modlist Atlas.bat`**. Your browser opens `http://localhost:8000`.
+   Windows SmartScreen may warn you the first time, because the file isn't signed. That's
+   expected: click **More info → Run anyway**. The file only starts Modlist Atlas on your PC.
+   On macOS or Linux, run `python3 tools/serve.py` instead. Uploaded lists work there, but the
+   *MO2 profile* option needs a Windows MO2 install.
 4. Name your first **session** and pick its game (see [Sessions](#keep-separate-plans-in-sessions)).
 5. Click **+ Add list** and pick one:
    - **MO2 profile**: point it at your Mod Organizer 2 folder and choose a profile.
@@ -43,9 +54,16 @@ others. Vortex lists aren't supported.
 Add at least two lists to compare them. To refresh a list after changing it in MO2, use
 **Re-snapshot** on the Overview page.
 
+**Updating:** download the new ZIP and unzip it over your existing Modlist Atlas folder, replacing
+files when asked. Your lists, decisions and settings are kept. Don't unzip it to a new folder: the
+app would look empty there, because your data stays in the old folder (see
+[Where your data lives](#where-your-data-lives)). If you used git, run `git pull` instead.
+
 ## A tour
 
 ### Compare lists side by side
+
+![Clicking list chips to show mods in my-setup but not in wabbajack-list, then marking one Keep and one Drop](docs/screenshots/compare.gif)
 
 Every mod gets one row, and every list gets a column. Click the list chips at the top to cycle each
 one through *any → in → not in*. For example, *in my-setup, not in wabbajack-list* shows exactly
@@ -53,10 +71,8 @@ what you'd lose by switching. Or click a segment of the overlap bar. **Versions 
 that both lists have in different versions (only lists snapshotted from MO2 have versions).
 **Download CSV** exports the current view, with your decisions, for a spreadsheet.
 
-In tables the column headings stay in view as you scroll. If a table is too wide for the window,
-it scrolls sideways in its own frame, with the mod names kept on the left. Your comments have their own column. Click **Comment** in the
-header to filter it like in Excel: tick the comments to show (or *(Blanks)* for mods without
-one), or search the list and press **OK**.
+Your comments have their own column, and you can filter it like in Excel: click **Comment** in
+the header.
 
 ### Browse a list
 
@@ -72,7 +88,8 @@ which of your lists contain that mod.
 
 Click a mod for its details: its description, a Nexus link, and which lists contain it. Mark it
 **Keep**, **Drop** or **Maybe** and add a comment, such as *replaced by Lux* or *needs a patch*.
-In tables, the small **K / D / ?** buttons on each row do the same without opening the mod.
+In tables, the small **K / D / ?** buttons on each row (**?** is Maybe; hover a button to see its
+name) do the same without opening the mod.
 
 Decisions follow the mod, not the list. A mod you marked *keep* shows as *keep* in every list that
 has it, and decisions survive re-snapshots and deleting lists. Each session has its own decisions.
@@ -180,15 +197,7 @@ Everything stays in the project folder, unless you set `ATLAS_HOME` to use anoth
 Back these up to keep a history. None of them are part of the repository, so updating the tool
 never touches them.
 
-## Rebuilding a setup from a snapshot
-
-1. Install MO2 and the game, and create a profile.
-2. Copy `lists/<name>/profile/*` into `Mod Organizer 2/profiles/<profile>/` and re-set any blanked
-   INI values (such as the screenshot folder).
-3. Install each mod from the links in `MODLIST.md`, keeping the **same mod names** (MO2 matches
-   `modlist.txt` entries by folder name).
-4. Regenerate outputs that aren't on Nexus (for Skyrim: DynDOLOD, xLODGen, TexGen, Grass Cache,
-   PGPatcher and similar).
+To rebuild a setup from a snapshot, or to use the command line, see [Advanced use](docs/ADVANCED.md).
 
 ## Good to know
 
@@ -201,18 +210,6 @@ never touches them.
   other way, the app is a read-only viewer.
 - List colours repeat after 8 lists.
 
-## Command line
-
-The same snapshots and imports are available without the web app:
-
-```powershell
-python tools/export_modlist.py                                   # snapshot using .env
-python tools/export_modlist.py --mo2 "<MO2 folder>" --profile "<profile>" --name <list>
-python tools/export_modlist.py --name <list> --freeze            # ask before overwriting
-python tools/import_files.py "<profile folder | .zip | files>" --name <list> --game <nexus game, e.g. morrowind>
-python tools/serve.py --port 8123 --no-browser                   # another port, no browser
-```
-
 ## Development
 
 ```powershell
@@ -221,6 +218,10 @@ python -m unittest discover tests
 
 The tests use a temporary `ATLAS_HOME` and a fake MO2 install; they never touch your data or the
 network. See [DESIGN.md](DESIGN.md) for how the pieces fit together.
+
+## Feedback
+
+Found a bug or have an idea? Open an issue on [GitHub Issues](https://github.com/vivekmtk/modlist-atlas/issues).
 
 ## Credits and notes
 
