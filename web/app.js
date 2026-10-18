@@ -31,7 +31,7 @@ const S = {
   lists: [], data: {}, decisions: {}, local: null, descriptions: null, catalog: new Map(),
   // Nexus search results; names another list has an ID for; Comment column filter (null = all, else the ticked comments)
   matches: {}, knownNames: new Map(), noteSel: null,
-  ui: Object.assign({}, UI_DEFAULTS),
+  ui: structuredClone(UI_DEFAULTS),
   search: "", selected: null, navKeys: [], statusProblem: "", compareLimit: 500, lastFocus: null,
   // bulk edit: checkboxes stay hidden until "Select" is toggled on; picked holds catalog keys
   bulk: false, picked: new Set(), bulkDec: "unchanged", bulkNote: "",
@@ -92,7 +92,7 @@ async function loadSession() {
     setup = store.get("atlas-ui", {});
     try { localStorage.removeItem("atlas-ui"); } catch (e) { /* storage unavailable */ }
   }
-  S.ui = Object.assign({}, UI_DEFAULTS, setup);
+  S.ui = Object.assign(structuredClone(UI_DEFAULTS), setup);
   savedSetup = JSON.stringify(S.ui);
   S.session = session;
 }
