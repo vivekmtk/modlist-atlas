@@ -287,6 +287,10 @@ class CoreTests(unittest.TestCase):
         self.assertIn("From Nexus.", md)
         self.assertIn("## Fixes", md)  # sections come from the snapshot's modlist.txt
         self.assertEqual(lib.read_json(out / "info.json", {})["plugins"], 2)
+        # nothing new in the cache: the files are left alone
+        (out / "MODLIST.md").write_text("untouched", "utf-8")
+        lib.reapply_nexus_cache("snap")
+        self.assertEqual((out / "MODLIST.md").read_text("utf-8"), "untouched")
 
 
 def fake_nexus(catalog):
@@ -565,6 +569,32 @@ class ServerTests(unittest.TestCase):
             lib.fetch_nexus = real
             os.environ["NEXUS_API_KEY"] = ""
             lib.NEXUS_CACHE.unlink(missing_ok=True)
+
+    def test_a_details_fetch_updates_every_snapshot_and_the_count_skips_cached_mods(self):
+        def fake_fetch(mods, api_key, progress=None, should_stop=lambda: False):
+            lib.write_json(lib.NEXUS_CACHE, {"skyrimspecialedition/123": {"summary": "From Nexus."}})
+
+        real, lib.fetch_nexus = lib.fetch_nexus, fake_fetch
+        os.environ["NEXUS_API_KEY"] = "test-key"
+        other = lib.create_session("Elsewhere", "skyrimspecialedition")["name"]
+        try:
+            self.request("POST", "/api/snapshot", body={"mo2": str(self.mo2), "profile": "Default", "name": "older", "session": other})
+            snap = {"mo2": str(self.mo2), "profile": "Default", "name": "newer", "session": self.session}
+            self.request("POST", "/api/snapshot", body=snap)
+            status, body = self.request("GET", f"/api/nexus/details?session={self.session}")
+            self.assertEqual((status, body["todo"]), (200, 1))  # Engine Fix; Plain Mod has no Nexus ID
+            self.assertEqual(self.request("GET", "/api/nexus/details?session=nope")[0], 404)
+            self.assertEqual(self.request("POST", "/api/snapshot", body={**snap, "details": True})[0], 200)
+            self.wait_for_nexus_job()
+            self.assertEqual(self.request("GET", f"/api/nexus/details?session={self.session}")[1]["todo"], 0)
+            # the other session's snapshot wasn't fetched for, but gets what the cache has now
+            fix = {m["name"]: m for m in lib.read_json(lib.LISTS / "older" / "mods.json", [])}["Engine Fix"]
+            self.assertEqual(fix["summary"], "From Nexus.")
+        finally:
+            lib.fetch_nexus = real
+            os.environ["NEXUS_API_KEY"] = ""
+            lib.NEXUS_CACHE.unlink(missing_ok=True)
+            self.request("POST", "/api/session/delete", body={"name": other, "confirm": True})
 
     def test_snapshot_asks_before_replacing_a_list_from_another_profile(self):
         snap = {"mo2": str(self.mo2), "profile": "Default", "name": "other"}

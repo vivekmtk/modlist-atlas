@@ -28,7 +28,8 @@ const S = {
   // a session is one plan: its game, its lists, its filters (ui) and its decisions. allLists holds every
   // list on disk; lists only the session's
   sessions: [], session: null, allLists: [],
-  lists: [], data: {}, decisions: {}, local: null, descriptions: null, catalog: new Map(),
+  // refData: mods of the game's MO2 snapshots outside the session, only to borrow Nexus IDs and details from
+  lists: [], data: {}, refData: {}, decisions: {}, local: null, descriptions: null, catalog: new Map(),
   // Nexus search results; names another list has an ID for; Comment column filter (null = all, else the ticked comments)
   matches: {}, knownNames: new Map(), noteSel: null,
   ui: structuredClone(UI_DEFAULTS),
@@ -106,6 +107,11 @@ async function loadAll() {
   await Promise.all(S.lists.map(async (l) => {
     S.data[l.name] = await getJSON(`lists/${encodeURIComponent(l.name)}/mods.json`).catch(() => []);
   }));
+  S.refData = {};
+  const refs = S.session ? S.allLists.filter((l) => l.source === "mo2" && l.game === gameOf() && !S.lists.includes(l)) : [];
+  await Promise.all(refs.map(async (l) => {
+    S.refData[l.name] = await getJSON(`lists/${encodeURIComponent(l.name)}/mods.json`).catch(() => []);
+  }));
   S.decisions = S.session ? await getJSON(sessionPath("decisions.json")).catch(() => ({})) : {};
   S.matches = await getJSON("data/nexus_match.json").catch(() => ({}));
   S.statusProblem = "";
@@ -171,11 +177,22 @@ const nexusMatchOf = (nameKey) => S.matches.games?.[gameOf()]?.[nameKey] || null
 const isMatched = (entry) => (entry?.status === "auto" || entry?.status === "accepted") && entry.id;
 
 function buildCatalog() {
-  // name-only mods (uploaded lists) resolve to a Nexus key when another list knows the name,
-  // or else when a Nexus search matched it (automatically or confirmed by the user)
+  // name-only mods (uploaded lists) resolve to a Nexus key when another list knows the name (the
+  // session's lists first, then the game's other snapshots), or else when a Nexus search matched it
+  // (automatically or confirmed by the user). The name search skips the same names (tools/nexus_match.py).
   const nameIdx = new Map();
-  for (const l of S.lists) for (const m of S.data[l.name]) {
+  for (const ms of [...S.lists.map((l) => S.data[l.name]), ...Object.values(S.refData)]) for (const m of ms) {
     if (!m.key.startsWith("name:") && !nameIdx.has(normName(m.name))) nameIdx.set(normName(m.name), m.key);
+  }
+  // what the other snapshots know about each Nexus key, for details the session's lists don't have
+  const refIdx = new Map();
+  for (const ms of Object.values(S.refData)) for (const m of ms) {
+    if (m.key.startsWith("name:")) continue;
+    const r = refIdx.get(m.key) || refIdx.set(m.key, {}).get(m.key);
+    for (const f of ["url", "picture", "author", "nexus_id", "endorsements"]) if (!r[f] && m[f]) r[f] = m[f];
+    if (m.category && m.category !== "Uncategorized") r.category ||= m.category;
+    if (m.summary_source === "nexus" && r.summary_source !== "nexus") { r.summary = m.summary; r.summary_source = "nexus"; }
+    else r.summary ||= m.summary;
   }
   S.knownNames = nameIdx;
   S.catalog = new Map();
@@ -195,6 +212,12 @@ function buildCatalog() {
     if (m.summary_source === "nexus" && rec.summary_source !== "nexus") { rec.summary = m.summary; rec.summary_source = "nexus"; }
   }
   for (const rec of S.catalog.values()) {
+    const ref = refIdx.get(rec.key);
+    if (ref) {
+      for (const f of ["url", "picture", "author", "nexus_id", "endorsements", "category"]) rec[f] ||= ref[f];
+      if (ref.summary_source === "nexus" && rec.summary_source !== "nexus") { rec.summary = ref.summary; rec.summary_source = "nexus"; }
+      else rec.summary ||= ref.summary;
+    }
     for (const { entry } of rec.nms) {
       const c = isMatched(entry) && entry.candidates.find((x) => x.id === entry.id);
       if (!c) continue;
@@ -1402,19 +1425,20 @@ function nexusSummary() {
   for (const k of names) if (game[k]) { cached++; if (game[k].status === "none") misses++; }
   const todo = names.size - cached + (retry ? misses : 0);
   const mins = Math.ceil((todo / 12) * 3 / 60);
-  const details = S.local?.nexus_key ? missingDetails() : 0;
+  const details = detailsTodo;
   return `<b>${names.size.toLocaleString()}</b> mod names have no Nexus ID · <b>${cached.toLocaleString()}</b> already searched${misses ? ` (${misses.toLocaleString()} not found)` : ""} ·
-    <b>${todo.toLocaleString()}</b> to search${todo ? ` (about ${mins} min)` : ""}${S.local?.nexus_key ? ` · <b>${details.toLocaleString()}</b> mods with a Nexus ID to fetch details for${details ? ` (about ${Math.ceil(details * 0.5 / 60)} min)` : ""}` : ""}`;
+    <b>${todo.toLocaleString()}</b> to search${todo ? ` (about ${mins} min)` : ""}${details !== null ? ` · <b>${details.toLocaleString()}</b> mods with a Nexus ID to fetch details for${details ? ` (about ${Math.ceil(details * 0.5 / 60)} min)` : ""}` : ""}`;
 }
 
-// mods in the session's snapshots with a Nexus ID but no Nexus summary yet (what the details fetch gets)
-function missingDetails() {
-  const keys = new Set();
-  for (const l of S.lists) if (l.source === "mo2") for (const m of S.data[l.name]) if (m.nexus_id && m.summary_source !== "nexus" && !m.unavailable) keys.add(m.key);
-  return keys.size;
+// how many mods in the session's snapshots the details fetch asks Nexus about (the server knows the cache);
+// null: no API key, or not known yet
+let nexusPoll = null, detailsTodo = null;
+async function loadDetailsTodo() {
+  detailsTodo = null;
+  if (!S.local?.nexus_key) return;
+  const j = await fetch(`api/nexus/details?session=${encodeURIComponent(S.session.name)}`).then((r) => r.json()).catch(() => null);
+  detailsTodo = typeof j?.todo === "number" ? j.todo : null;
 }
-
-let nexusPoll = null;
 async function openNexusLookup() {
   openModal(`<div class="modal-head"><h2 id="modalTitle">Find mods on Nexus</h2><button class="btn icon ghost" data-act="modal-close" aria-label="Close">×</button></div>
     <div class="modal-body">
@@ -1426,9 +1450,10 @@ async function openNexusLookup() {
       <div id="nxProgress"></div>
       <div class="modal-actions" id="nxActions"><button class="btn ghost" data-act="modal-close">Close</button><button class="btn primary" id="goBtn" data-act="nx-go">Search Nexus</button></div>
     </div>`);
-  const update = () => { $("#nxSummary").innerHTML = nexusSummary(); };
+  const update = () => { if ($("#nxSummary")) $("#nxSummary").innerHTML = nexusSummary(); };
   $("#nxRetry").addEventListener("change", update);
   update();
+  loadDetailsTodo().then(update);
   const r = await fetch("api/nexus/progress").then((x) => x.json()).catch(() => null);
   if (r?.running) watchNexusLookup();
 }
@@ -1475,7 +1500,7 @@ function watchNexusLookup() {
         resolveDecisionKeys();
       }
       render();
-      if ($("#nxSummary")) $("#nxSummary").innerHTML = nexusSummary();
+      if ($("#nxSummary")) { await loadDetailsTodo(); $("#nxSummary").innerHTML = nexusSummary(); }
       if (!$("#nxProgress")) toast(p.error || (p.phase === "details" ? "Nexus details added" : "Nexus search finished"));
     }
     paint(p);

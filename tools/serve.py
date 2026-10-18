@@ -24,6 +24,7 @@ user's lists, descriptions and decisions) and a small JSON API used by the app:
     POST /api/nexus/lookup            {domain, retry, session?}  -> in the background, searches Nexus for name-only
                                       mods, then (with NEXUS_API_KEY) fetches missing Nexus details for the session's lists
     GET  /api/nexus/progress          the background search's progress
+    GET  /api/nexus/details?session=<s>  how many mods in the session's snapshots have no Nexus details cached
     POST /api/nexus/stop              stops it after the current batch (results so far are kept)
     POST /api/nexus/match             {domain, key, action: accept|reject|reset, id} -> data/nexus_match.json
 """
@@ -200,6 +201,12 @@ class Handler(SimpleHTTPRequestHandler):
         if url.path == "/api/nexus/progress":
             with nexus_job_lock:
                 return self.send_json(200, {k: v for k, v in nexus_job.items() if k != "stop"})
+        if url.path == "/api/nexus/details":
+            session = lib.read_session((parse_qs(url.query).get("session") or [""])[0])
+            if not session:
+                return self.send_json(404, {"error": "Unknown session; reload the page."})
+            mods = [m for n in session_snapshots(session) for m in lib.read_json(lib.LISTS / n / "mods.json", [])]
+            return self.send_json(200, {"todo": len(lib.nexus_todo(mods, lib.read_json(lib.NEXUS_CACHE, {})))})
         if url.path.startswith("/api/"):
             return self.send_error(404)
         if resolve_static(url.path) is None:
@@ -540,10 +547,7 @@ class Handler(SimpleHTTPRequestHandler):
         if session is False:
             return
         # details come from the Nexus API, so only with a key; only snapshots have the Nexus IDs to look up
-        details = []
-        if session and os.environ.get("NEXUS_API_KEY"):
-            details = [i["name"] for i in lib.read_json(lib.LISTS / "index.json", [])
-                       if i["name"] in session.get("lists", []) and i.get("source") == "mo2"]
+        details = session_snapshots(session) if session and os.environ.get("NEXUS_API_KEY") else []
         if not start_nexus_job(domain, bool(body.get("retry")), details=details):
             return self.send_json(409, {"error": "A Nexus search is already running."})
         return self.send_json(200, {"ok": True})
@@ -567,6 +571,16 @@ class Handler(SimpleHTTPRequestHandler):
         except ValueError as e:
             return self.send_json(400, {"error": str(e)})
         return self.send_json(200, {"ok": True, "entry": entry})
+
+
+def snapshots(names=None) -> list:
+    """MO2 snapshots (only they have Nexus IDs to fetch details for), all or those in names."""
+    return [i["name"] for i in lib.read_json(lib.LISTS / "index.json", [])
+            if i.get("source") == "mo2" and (names is None or i["name"] in names)]
+
+
+def session_snapshots(session) -> list:
+    return snapshots(session.get("lists", []))
 
 
 def start_nexus_job(domain: str, retry: bool, names: bool = True, details=()) -> bool:
@@ -609,8 +623,9 @@ def run_nexus_job(domain: str, retry: bool, names: bool = True, details=()):
     except Exception as e:  # network trouble etc.: report it, keep what was saved
         error = f"Search stopped: {e}. Results so far are saved; run it again to continue."
     if details:
+        # every snapshot, not only the ones fetched for: an older one may miss mods the cache has now
         with lists_lock:  # waits for a running snapshot or import
-            for n in details:
+            for n in snapshots():
                 try:
                     lib.reapply_nexus_cache(n)
                 except (OSError, ValueError) as e:

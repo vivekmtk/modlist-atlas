@@ -48,9 +48,11 @@ index.html + web/app.{js,css}  ◄── fetch ───────────
 - **Snapshots never wait for Nexus.** The app's snapshots run the exporter with `--no-api`, so a
   list is saved in seconds. Nexus details (summaries, pictures, authors) are fetched in the same
   background job as the name search, either for the new list (the snapshot's checkbox) or for the
-  session's MO2 snapshots (**Find on Nexus**, after the name search). When it finishes, each list is
-  rewritten from the cache and its own copy of `modlist.txt`, without reading MO2 again, so a
-  changed MO2 profile is never snapshotted behind the user's back.
+  session's MO2 snapshots (**Find on Nexus**, after the name search). When it finishes, every MO2
+  snapshot the cache has something new for is rewritten from the cache and its own copy of
+  `modlist.txt` (not only the ones fetched for, so an older snapshot never stays behind the cache),
+  without reading MO2 again, so a changed MO2 profile is never snapshotted behind the user's back.
+  The dialog's count comes from the server, which knows the cache, so cached mods aren't counted.
 - **Name search: automatic only when unambiguous.** A name-only mod is linked automatically only
   when exactly one Nexus mod in that game has that exact title. Similar titles (all words present),
   and searches on a trimmed name (`X - BSA Version` → `X`), are only suggestions for the user to
@@ -68,7 +70,10 @@ index.html + web/app.{js,css}  ◄── fetch ───────────
 - **Mod identity = Nexus key** (`skyrimspecialedition/<id>`), falling back to a normalized name
   (`name:<letters+digits>`). The web app resolves name-only mods (uploaded lists) to
   a Nexus key when any other list has a mod with the same normalized name, and borrows its link,
-  category and description. Several MO2 mods can share one Nexus key (main file + optional files);
+  category and description. "Any other list" includes the game's MO2 snapshots outside the session:
+  the app loads them for reference only (never shown as lists), so a mod's Nexus ID and details,
+  which belong to the mod and not to a list, reach every session without extra Nexus requests. The
+  name search skips the same names, since it already checks every list on disk. Several MO2 mods can share one Nexus key (main file + optional files);
   they're shown as one record with "+N files" in Compare.
 - **Sessions separate plans, including their lists.** A session is a name, a game, its lists
   (`session.json: lists`), the app's setup (filters, view) and its own decisions, in

@@ -277,15 +277,21 @@ def parse_modlist(lines, display_order=False):
 
 # ---------------------------------------------------------------- Nexus API
 
-def fetch_nexus(mods, api_key: str, progress=None, should_stop=lambda: False):
-    """Fill data/nexus_cache.json for mods not fetched yet. Returns the cache.
-    progress(done, total) is called before the first mod and after each one."""
-    cache = read_json(NEXUS_CACHE, {})
+def nexus_todo(mods, cache) -> list:
+    """The mods (one per Nexus key) the Nexus API hasn't been asked about yet."""
     todo, seen = [], set()
     for m in mods:
         if m["nexus_id"] and m["key"] not in cache and m["key"] not in seen:
             seen.add(m["key"])
             todo.append(m)
+    return todo
+
+
+def fetch_nexus(mods, api_key: str, progress=None, should_stop=lambda: False):
+    """Fill data/nexus_cache.json for mods not fetched yet. Returns the cache.
+    progress(done, total) is called before the first mod and after each one."""
+    cache = read_json(NEXUS_CACHE, {})
+    todo = nexus_todo(mods, cache)
     print(f"Nexus API: {len(todo)} mods to fetch ({len(cache)} cached)")
     if progress:
         progress(0, len(todo))
@@ -351,7 +357,8 @@ def apply_nexus_cache(mods):
 
 def reapply_nexus_cache(name: str):
     """Rewrite an MO2 snapshot with what the Nexus cache has now (after a background fetch),
-    without reading MO2 again. The sections come from the snapshot's own copy of modlist.txt."""
+    without reading MO2 again; left alone when the cache adds nothing. The sections come from the
+    snapshot's own copy of modlist.txt."""
     out = LISTS / name
     info, mods = read_json(out / "info.json", None), read_json(out / "mods.json", None)
     modlist = out / "profile" / "modlist.txt"
@@ -360,7 +367,10 @@ def reapply_nexus_cache(name: str):
     entries = list(parse_modlist(modlist.read_text("utf-8").splitlines()))
     if sum(flag != "sep" for flag, _, _ in entries) != len(mods):
         return  # not the modlist.txt this snapshot was made from
+    before = json.dumps(mods)
     apply_nexus_cache(mods)
+    if json.dumps(mods) == before:
+        return
     sections, rest = [{"name": UNSORTED, "mods": []}], iter(mods)
     for flag, mod_name, _ in entries:
         if flag == "sep":
